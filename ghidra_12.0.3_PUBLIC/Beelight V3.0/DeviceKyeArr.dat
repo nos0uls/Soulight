@@ -1,0 +1,30 @@
+====================================== 
+# 立柱灯
+======================================
+[lamp]
+DeviceKyeArr="kqugwpnf9fddkuwe"
+====================================== 
+# 灯带
+======================================
+[light]
+DeviceKyeArr="diy-d6lfwphynoh3,fqhgd6lfwphynoh3"
+====================================== 
+# 灯泡
+======================================
+[bulb]
+DeviceKyeArr="7tj8z8oybgzbxqol,i0hpwfp2ctpksddl"
+====================================== 
+# 网络灯带
+======================================
+[lightnetwork]
+DeviceKyeArr="zlsh1vba766vxdzg,tkrzmccuop2kgm2a"
+====================================== 
+# 天花灯带
+======================================
+[bulblight]
+DeviceKyeArr="ns0kxatqrkezy3mu,swpvgpygowhm8xu0"
+====================================== 
+# 落地灯
+======================================
+[floorlamp]
+DeviceKyeArr="zlsh1vba766vxdzgs"
