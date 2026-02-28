@@ -1,0 +1,8 @@
+﻿Specify --help for a list of available options and commands.
+ilspycmd : Missing value for option 'l'
+строка:1 знак:1
++ ilspycmd "C:\Program Files (x86)\Beelight\Beelight V3.0\Beelight.exe" ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Missing value for option 'l':String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
