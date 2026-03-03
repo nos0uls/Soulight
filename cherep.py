@@ -1,20 +1,32 @@
 from turtle import *
 tracer(0)
-k = 30
+k = 10
 
-right(90)
 
-for i in range(4):
-    forward(k * 8)
-    right(150)
-    forward(k* 8)
-    right(30)
-
+for i in range(2):
+   forward(k * 6)
+   right(90)
+   forward(k *12 )
+   right(90)
 penup()
 
+backward(k * -2)
+right(90)
+forward(k * 9)
+left(90)
+
+pendown()
+for i in range(4):
+    forward(8 * k)
+    right(90)
+
+   
+
+penup()
 for x in range(-20, 20):
     for y in range(-20, 20):
-        setpos(k * x, k * y)
+        setpos(x * k, y * k)
         dot(4, "red")
+
+
 done()
-        
