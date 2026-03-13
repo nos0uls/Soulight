@@ -1,0 +1,69 @@
+{
+  "counts": {
+    "top": 14,
+    "bottom": 5,
+    "left": 17,
+    "right": 12
+  },
+  "enabled": {
+    "top": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "bottom": [
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "left": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "right": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "start_corner": 1,
+  "clockwise": true,
+  "start_offset": 27
+}

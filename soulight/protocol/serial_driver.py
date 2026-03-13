@@ -48,6 +48,9 @@ class LEDDriver:
         self._write_lock = threading.Lock()
         # Текущий цвет (None = не задан, лента не горит активно)
         self._current_color = None
+        # Per-LED цвета: список [(r, g, b), ...] для каждого LED
+        # Если не None — используется вместо _current_color (приоритет)
+        self._current_per_led = None
         # Текущая яркость (0-255)
         self._brightness = 255
         # Интервал между пакетами в секундах (~15 пакетов/сек)
@@ -137,12 +140,23 @@ class LEDDriver:
 
     def set_color(self, r, g, b):
         """
-        Устанавливает цвет ленты (RGB 0-255).
-        Цвет подхватывается background send loop и отправляется непрерывно.
+        Устанавливает единый цвет для всей ленты (RGB 0-255).
+        Отключает per-LED режим.
         """
         if not self._connected:
             return
+        self._current_per_led = None
         self._current_color = (r, g, b)
+
+    def set_per_led_colors(self, colors_rgb):
+        """
+        Устанавливает индивидуальные цвета для каждого LED.
+        colors_rgb — список [(r, g, b), ...] длиной до 75.
+        Перекрывает режим solid color.
+        """
+        if not self._connected:
+            return
+        self._current_per_led = list(colors_rgb)
 
     def set_brightness(self, value):
         """
@@ -199,9 +213,26 @@ class LEDDriver:
         count = 0
 
         while not self._send_stop.is_set():
+            per_led = self._current_per_led
             color = self._current_color
 
-            if color is not None:
+            if per_led is not None:
+                # Per-LED режим: отправляем brightness + RGB transfer
+                bright_pkt = self._bridge.make_bright_packet(self._brightness)
+                self._safe_write(bright_pkt)
+                time.sleep(0.005)
+
+                rgb_pkt = self._bridge.make_rgb_transfer_packet(per_led)
+                self._safe_write(rgb_pkt)
+                count += 1
+
+                if count % self._hb_every == 0:
+                    self._safe_write(hb)
+                    time.sleep(0.005)
+
+                time.sleep(self._send_interval)
+
+            elif color is not None:
                 r, g, b = color
 
                 # Brightness перед каждым color (контроллер сбрасывает dimmer)

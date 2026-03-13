@@ -94,9 +94,11 @@ class BeelightBridge:
         # Ищем нужные типы в assembly
         lp_ctrl = None   # LProtocolCtrl — генерация control пакетов
         lp_base = None   # LProtocolBase — генерация frame пакетов
+        self._rgb_type = None  # LProtocolBase+RGB — struct для per-LED цветов
 
         for t in all_types:
             name = t.Name
+            full = str(t.FullName) if t.FullName else ""
             if name == "LProtocolCtrl":
                 lp_ctrl = t
             elif name == "LProtocolBase":
@@ -107,6 +109,9 @@ class BeelightBridge:
                 self._cmd_type = t
             elif name == "LP_ATTR":
                 self._attr_type = t
+            # LProtocolBase+RGB — nested struct с полями R, G, B (System.Byte)
+            if "LProtocolBase+RGB" in full:
+                self._rgb_type = t
 
         if lp_ctrl is None:
             print("[Bridge] LProtocolCtrl не найден в assembly")
@@ -224,6 +229,41 @@ class BeelightBridge:
             return bytes(result) if result is not None else None
         except Exception as e:
             print(f"[Bridge] make_workmode_pc_packet error: {e}")
+            return None
+
+    def make_rgb_transfer_packet(self, colors_rgb):
+        """
+        Генерирует wire-format пакет для per-LED управления.
+        colors_rgb — список туплов [(r, g, b), ...] для каждого LED.
+        Возвращает bytes или None.
+        """
+        if (not self._ready or self._gen_rgb_transfer is None
+                or self._rgb_type is None):
+            return None
+        try:
+            from System import Array, Byte as NetByte
+            from System.Reflection import BindingFlags
+            from System.Runtime.Serialization import FormatterServices
+
+            n = len(colors_rgb)
+            arr = Array.CreateInstance(self._rgb_type, n)
+
+            flags = BindingFlags.Public | BindingFlags.Instance
+            field_r = self._rgb_type.GetField("R", flags)
+            field_g = self._rgb_type.GetField("G", flags)
+            field_b = self._rgb_type.GetField("B", flags)
+
+            for i, (rv, gv, bv) in enumerate(colors_rgb):
+                rgb = FormatterServices.GetUninitializedObject(self._rgb_type)
+                field_r.SetValue(rgb, NetByte(int(rv)))
+                field_g.SetValue(rgb, NetByte(int(gv)))
+                field_b.SetValue(rgb, NetByte(int(bv)))
+                arr.SetValue(rgb, i)
+
+            result = self._gen_rgb_transfer.Invoke(None, [arr, Byte(0)])
+            return bytes(result) if result is not None else None
+        except Exception as e:
+            print(f"[Bridge] make_rgb_transfer_packet error: {e}")
             return None
 
     def get_heartbeat(self):

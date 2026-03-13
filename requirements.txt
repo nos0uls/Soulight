@@ -1,0 +1,4 @@
+pythonnet>=3.0.5
+PyQt6>=6.6
+pyserial>=3.5
+mss>=9.0.1

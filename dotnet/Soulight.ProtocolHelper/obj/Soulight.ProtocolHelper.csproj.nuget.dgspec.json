@@ -1,0 +1,53 @@
+{
+  "format": 1,
+  "restore": {
+    "C:\\Users\\n0souls\\Documents\\GitHub\\Soulight\\dotnet\\Soulight.ProtocolHelper\\Soulight.ProtocolHelper.csproj": {}
+  },
+  "projects": {
+    "C:\\Users\\n0souls\\Documents\\GitHub\\Soulight\\dotnet\\Soulight.ProtocolHelper\\Soulight.ProtocolHelper.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "C:\\Users\\n0souls\\Documents\\GitHub\\Soulight\\dotnet\\Soulight.ProtocolHelper\\Soulight.ProtocolHelper.csproj",
+        "projectName": "Soulight.ProtocolHelper",
+        "projectPath": "C:\\Users\\n0souls\\Documents\\GitHub\\Soulight\\dotnet\\Soulight.ProtocolHelper\\Soulight.ProtocolHelper.csproj",
+        "packagesPath": "C:\\Users\\n0souls\\.nuget\\packages\\",
+        "outputPath": "C:\\Users\\n0souls\\Documents\\GitHub\\Soulight\\dotnet\\Soulight.ProtocolHelper\\obj\\",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "C:\\Users\\n0souls\\AppData\\Roaming\\NuGet\\NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net48"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net48": {
+            "targetAlias": "net48",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        }
+      },
+      "frameworks": {
+        "net48": {
+          "targetAlias": "net48",
+          "dependencies": {
+            "Microsoft.NETFramework.ReferenceAssemblies": {
+              "suppressParent": "All",
+              "target": "Package",
+              "version": "[1.0.2, )",
+              "autoReferenced": true
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\6.0.428\\RuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}

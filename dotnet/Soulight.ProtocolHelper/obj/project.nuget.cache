@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "s0TuLbBZcwT0EThY2mFBjCwCpjWAUbMI0nD4CQWH2bRmZlFS4zW+X3sUm6Ran2uS9154gIp23TVwAWCzpGwyCw==",
+  "success": true,
+  "projectFilePath": "C:\\Users\\n0souls\\Documents\\GitHub\\Soulight\\dotnet\\Soulight.ProtocolHelper\\Soulight.ProtocolHelper.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\n0souls\\.nuget\\packages\\microsoft.netframework.referenceassemblies\\1.0.2\\microsoft.netframework.referenceassemblies.1.0.2.nupkg.sha512",
+    "C:\\Users\\n0souls\\.nuget\\packages\\microsoft.netframework.referenceassemblies.net48\\1.0.2\\microsoft.netframework.referenceassemblies.net48.1.0.2.nupkg.sha512"
+  ],
+  "logs": []
+}

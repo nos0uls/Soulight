@@ -185,47 +185,108 @@ requirements.txt    # pythonnet, PyQt6, pyserial
 README.md
 ```
 
+## Фаза 2: Режимы и расширенный функционал (три в отдельных менюшках\на разных кнопках) 
+
+### 2.1 Режимы реакции на звук (Audio Modes)
+
+Оригинальное Beelight имело "Music" раздел с режимами реакции на аудио:
+
+- **Spectrum** — частотный анализ (высокие/низкие частоты → разные цвета)
+- **Electronic** — пульсация под бит (транс/техно)
+- **Lyricism** — плавные переходы под мелодию
+
+**Реализация:**
+- Захват аудио: `sounddevice` или `pyaudio`
+- FFT анализ в реальном времени
+- Параметрические режимы (разные алгоритмы маппинга частот → цвет)
+
+### 2.2 Сценические режимы (Scenes)
+
+Предустановленные анимации без привязки к экрану/звуку:
+
+| Сцена | Описание |
+|-------|----------|
+| Rainbow | Радуга, плавный перебор Hue |
+| Fire | Огонь: красный→оранжевый, мерцание |
+| Vitality | Энергичная смена цветов |
+| Firework | Имитация фейерверка (вспышки) |
+| Seasons | Медленные сезонные палитры |
+| Warm | Тёплый жёлтый, имитация свечи |
+| Aurora | Полярное сияние (зелёный→фиолетовый) |
+| Romance | Медленные розовые переходы |
+| Flow | Плавное течение цвета по ленте |
+| Chase | Бегущие огни |
+
+**Реализация:**
+- Фоновый thread с паттерн-генераторами
+- `GenRGBTransferPackage` — per-LED контроль для "бегущих" эффектов
+- Настраиваемая скорость (Speed slider)
+
+### 2.3 LED Configuration UI
+
+Визуальная настройка расположения LED по периметру экрана (как на скриншоте):
+
+**Элементы:**
+- Представление монитора с 4 сторонами
+- Выбор начальной точки (1-4 угла)
+- Направление (по часовой/против)
+- Количество LED на каждой стороне (top, bottom, left, right)
+- Enable/disable отдельных LED (checkbox на каждом с возможностью выделения нескольких сразу)
+- "All selected" — выбрать всё
+- Reset / Confirm кнопки
+- LED загораются, когда ты их выбираешь, зеленым синим красным белый на каждой из сторон, соответственно отображению в приложении. 
+
+**Реализация:**
+- Custom QWidget с отрисовкой схемы
+- Drag-select или click-select для LED
+- Сохранение конфигурации в JSON
+
+### 2.4 Smooth/Normal/Fast режимы
+
+Управляют двумя параметрами:
+- **Target FPS** — частота обновления ленты
+  - Smooth: ~15 fps (медленно, плавно)
+  - Normal: ~25 fps
+  - Fast: ~40 fps (быстро, реактивно)
+- **Smoothing factor** — сглаживание переходов (0.0-1.0)
+
+**Реализация:**
+- UI: 3 кнопки с иконками спидометра
+- Влияет на `_send_interval` в LEDDriver
+
 ---
 
-## Фаза 2: Screen Mirroring (после Solid Color)
+## Фаза 3: Screen Mirroring (Ambilight)
 
-### 2.0 Предварительный тест
+### 3.0 Предварительный тест
 Перед началом: протестировать `GenRGBTransferPackage(Color[], channel)` — если один вызов отправляет все 75 LED в одном пакете, screen mirroring реален через LP.
 
-Если не работает — fallback на screen mirroring протокол (238-byte пакеты, XOR stream cipher). Это сложнее, но данные для анализа есть.
-
-### 2.1 Screen Capture
-- `mss` библиотека, 30fps целевой (60fps избыточно для 75 LED)
+### 3.1 Screen Capture
+- `mss` библиотека, 30fps целевой
 - Захват только нужной области (primary monitor)
 
-### 2.2 LED Sampling
-- Разбиение краёв экрана на зоны (по числу LED на каждой стороне)
-- Среднее значение RGB в каждой зоне
-- numpy для быстрого вычисления
+### 3.2 LED Sampling
+- Разбиение краёв экрана на зоны согласно LED Configuration
+- numpy для быстрого усреднения RGB
 
-### 2.3 LED Configuration
-- Сколько LED на каждой стороне (top, bottom, left, right)
-- Offset начальной точки
-- Возможность отключить отдельные LED / стороны
+### 3.3 Smoothing
+- Линейная интерполяция между кадрами (predictive, не reactive)
+- Настраиваемый smoothing factor
 
-### 2.4 Smoothing
-- Линейная интерполяция между кадрами (предотвращает резкие переходы)
-- Настраиваемая сила сглаживания
-
-### 2.5 UI для mirroring
-- Превью монитора с LED по периметру (10fps для UI, 30fps для данных)
-- Start/Stop кнопка
-- FPS counter
-- Настройки: яркость, насыщенность, smoothing, target FPS
+### 3.4 UI для mirroring
+- Превью монитора с LED по периметру
+- Start/Stop, FPS counter
+- Настройки: brightness, saturation, delay compensation
 
 ---
 
 ## Порядок работы
 
-1. **pythonnet bridge** — загрузка Beelight.exe из Python, тест GenColorPackage
-2. **serial_driver** — подключение, heartbeat thread, set_color()
-3. **UI: color picker** — минимальное окно с палитрой и слайдерами
-4. **UI: пресеты и настройки** — быстрые цвета, яркость, COM порт
-5. **Тест GenRGBTransferPackage** — feasibility per-LED контроля
-6. **Screen capture + sampling** — mss + numpy
-7. **UI: mirroring** — превью, start/stop, настройки
+1. ✅ **pythonnet bridge** — загрузка Beelight.exe из Python, тест GenColorPackage
+2. ✅ **serial_driver** — подключение, heartbeat thread, set_color()
+3. ✅ **UI: Solid Color** — color picker, RGB слайдеры, пресеты
+4. **Тест GenRGBTransferPackage** — feasibility per-LED контроля
+5. **UI: LED Configuration** — визуальная настройка LED по сторонам
+6. **UI: Scenes** — паттерн-режимы (Rainbow, Fire, Aurora...)
+7. **UI: Audio Modes** — Spectrum, Electronic, Lyricism...
+8. **Screen mirroring** — mss capture + LED sampling

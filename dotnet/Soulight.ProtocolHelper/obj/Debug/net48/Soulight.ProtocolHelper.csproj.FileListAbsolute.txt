@@ -1,0 +1,7 @@
+C:\Users\n0souls\Documents\GitHub\Soulight\dotnet\Soulight.ProtocolHelper\bin\Debug\net48\Soulight.ProtocolHelper.dll
+C:\Users\n0souls\Documents\GitHub\Soulight\dotnet\Soulight.ProtocolHelper\bin\Debug\net48\Soulight.ProtocolHelper.pdb
+C:\Users\n0souls\Documents\GitHub\Soulight\dotnet\Soulight.ProtocolHelper\obj\Debug\net48\Soulight.ProtocolHelper.csproj.AssemblyReference.cache
+C:\Users\n0souls\Documents\GitHub\Soulight\dotnet\Soulight.ProtocolHelper\obj\Debug\net48\Soulight.ProtocolHelper.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\n0souls\Documents\GitHub\Soulight\dotnet\Soulight.ProtocolHelper\obj\Debug\net48\Soulight.ProtocolHelper.csproj.CoreCompileInputs.cache
+C:\Users\n0souls\Documents\GitHub\Soulight\dotnet\Soulight.ProtocolHelper\obj\Debug\net48\Soulight.ProtocolHelper.dll
+C:\Users\n0souls\Documents\GitHub\Soulight\dotnet\Soulight.ProtocolHelper\obj\Debug\net48\Soulight.ProtocolHelper.pdb
