@@ -262,7 +262,7 @@ README.md
 Перед началом: протестировать `GenRGBTransferPackage(Color[], channel)` — если один вызов отправляет все 75 LED в одном пакете, screen mirroring реален через LP.
 
 ### 3.1 Screen Capture
-- `mss` библиотека, 30fps целевой
+- `mss` библиотека, 30fps целевой 
 - Захват только нужной области (primary monitor)
 
 ### 3.2 LED Sampling
