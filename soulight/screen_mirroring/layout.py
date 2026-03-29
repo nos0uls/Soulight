@@ -138,7 +138,10 @@ def build_layout(config: LEDConfig, capture_width: int, capture_height: int, edg
 
     leds: List[LayoutLed] = []
     logical_index = 0
-    physical_index = config.start_offset
+    # LED цвета начинаются с индекса 0.
+    # Offset чёрные LED будут в конце буфера (indices total..total+offset-1).
+    # bridge.py реверсирует массив → offset окажется в начале физической ленты.
+    physical_index = 0
 
     for side, reverse in traversal:
         side_count = config.counts.get(side, 0)

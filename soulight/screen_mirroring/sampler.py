@@ -12,6 +12,8 @@
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 from soulight.screen_mirroring.layout import ScreenMirrorLayout, LayoutLed, SampleRect
 from soulight.screen_mirroring.screen_capture import CaptureFrame
 
@@ -80,6 +82,7 @@ def sample_frame(
     frame: CaptureFrame,
     layout: ScreenMirrorLayout,
     smoother: Optional[FrameSmoother] = None,
+    saturation_boost: float = 1.0,
 ) -> SampledColors:
     if frame.width != layout.capture_width or frame.height != layout.capture_height:
         raise ValueError("frame size does not match layout capture size")
@@ -89,13 +92,20 @@ def sample_frame(
         if not led.enabled:
             logical_colors.append((0, 0, 0))
             continue
-        logical_colors.append(_average_rect_bgra(frame, led.sample_rect))
+        color = _average_rect_bgra(frame, led.sample_rect)
+        # Saturation boost делает цвета насыщеннее (как у Beelight).
+        # При boost=1.0 цвет не меняется.
+        if saturation_boost != 1.0:
+            color = _boost_saturation(*color, saturation_boost)
+        logical_colors.append(color)
 
     if smoother is not None:
         logical_colors = smoother.apply(logical_colors)
 
-    # physical_colors включает start_offset как чёрный префикс.
-    # Это важно, чтобы буфер соответствовал реальной физической ленте.
+    # physical_colors включает start_offset как чёрный суффикс.
+    # bridge.py реверсирует весь массив перед отправкой, поэтому
+    # чёрные offset-LED должны быть в конце буфера — после реверса
+    # они окажутся в начале физической ленты (до монитора).
     physical_colors: List[Tuple[int, int, int]] = [(0, 0, 0)] * layout.physical_led_count
     for led, color in zip(layout.leds, logical_colors):
         physical_colors[led.physical_index] = color
@@ -117,44 +127,43 @@ def flatten_rgb(colors: Iterable[Tuple[int, int, int]]) -> bytes:
     return bytes(out)
 
 
-# Эта функция считает средний RGB цвет прямоугольника внутри BGRA кадра.
-# Мы читаем сырые байты напрямую, чтобы не тянуть numpy раньше времени.
+# Эта функция считает средний RGB цвет прямоугольника внутри BGRA numpy-кадра.
+# Используем numpy slicing — на порядки быстрее поэлементного Python-цикла.
 def _average_rect_bgra(frame: CaptureFrame, rect: SampleRect) -> Tuple[int, int, int]:
-    stride = frame.width * 4
     x0 = max(0, min(frame.width, rect.x))
     y0 = max(0, min(frame.height, rect.y))
     x1 = max(x0 + 1, min(frame.width, rect.x + rect.width))
     y1 = max(y0 + 1, min(frame.height, rect.y + rect.height))
 
-    total_r = 0
-    total_g = 0
-    total_b = 0
-    pixels = 0
-    data = frame.bgra
-
-    for y in range(y0, y1):
-        row_base = y * stride
-        for x in range(x0, x1):
-            i = row_base + x * 4
-            b = data[i]
-            g = data[i + 1]
-            r = data[i + 2]
-            total_r += r
-            total_g += g
-            total_b += b
-            pixels += 1
-
-    if pixels <= 0:
+    # frame.bgra — numpy array shape (H, W, 4) dtype=uint8, порядок каналов BGRA
+    region = frame.bgra[y0:y1, x0:x1]
+    if region.size == 0:
         return (0, 0, 0)
 
-    return (
-        total_r // pixels,
-        total_g // pixels,
-        total_b // pixels,
-    )
+    # mean по осям 0,1 даёт средний цвет всей зоны (4 канала)
+    avg = region.mean(axis=(0, 1))
+    # BGRA → RGB
+    return (int(avg[2]), int(avg[1]), int(avg[0]))
 
+
+# region Color correction helpers
 
 # Простой clamp нужен, чтобы после blend и других вычислений
 # байтовые значения не выходили за диапазон 0..255.
 def _clamp(value: int) -> int:
     return max(0, min(255, int(value)))
+
+
+# Усиливает насыщенность одного RGB кортежа.
+# boost=1.0 — без изменений, boost=1.5 — на 50% ярче, boost=0.5 — на 50% бледнее.
+# Работает в пространстве HSV: увеличивает S канал без изменения H и V.
+def _boost_saturation(r: int, g: int, b: int, boost: float) -> Tuple[int, int, int]:
+    if boost == 1.0:
+        return (r, g, b)
+    import colorsys
+    h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+    s = min(1.0, s * boost)
+    nr, ng, nb = colorsys.hsv_to_rgb(h, s, v)
+    return (_clamp(int(nr * 255)), _clamp(int(ng * 255)), _clamp(int(nb * 255)))
+
+# endregion

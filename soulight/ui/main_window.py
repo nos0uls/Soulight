@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QSlider, QPushButton, QLineEdit, QGridLayout,
     QGroupBox, QFrame, QSizePolicy, QMessageBox, QTabWidget,
+    QComboBox,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QLinearGradient, QMouseEvent, QFont
@@ -15,6 +16,7 @@ from PyQt6.QtGui import QColor, QPainter, QLinearGradient, QMouseEvent, QFont
 from soulight.protocol.serial_driver import LEDDriver
 from soulight.ui.led_config_widget import LEDConfigPanel
 from soulight.color_preset import ColorPreset
+from soulight.screen_mirroring.engine import ScreenMirrorEngine
 
 
 # region Пресеты цветов — быстрые кнопки для частых цветов
@@ -96,6 +98,11 @@ class MainWindow(QMainWindow):
         self._auto_connect_max_attempts = 5
         self._auto_connect_delay_ms = 1000
         self._is_auto_connecting = False
+        # Screen mirroring: engine создаётся при старте, таймер тикает кадры
+        self._screen_mirror_engine = None
+        self._screen_mirroring_active = False
+        self._screen_mirror_timer = QTimer()
+        self._screen_mirror_timer.timeout.connect(self._tick_screen_mirroring)
         # Текущие RGB значения
         self._r = 255
         self._g = 0
@@ -156,6 +163,14 @@ class MainWindow(QMainWindow):
         self._led_config_panel = LEDConfigPanel()
         self._led_config_panel.config_confirmed.connect(self._on_led_config_confirmed)
         self._tabs.addTab(self._led_config_panel, "LED Config")
+
+        # Вкладка 3: Screen Mirror
+        screen_page = QWidget()
+        screen_layout = QVBoxLayout(screen_page)
+        screen_layout.setSpacing(12)
+        screen_layout.setContentsMargins(8, 8, 8, 8)
+        self._build_screen_mirror_tab(screen_layout)
+        self._tabs.addTab(screen_page, "Screen Mirror")
 
         # Tab change handler для управления состоянием ленты
         self._tabs.currentChanged.connect(self._on_tab_changed)
@@ -252,6 +267,278 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
+    def _build_screen_mirror_tab(self, layout):
+        """Строит вкладку Screen Mirror: выбор монитора, tuning, start/stop."""
+        # Статус — Idle / Running / Error
+        self._mirror_status_label = QLabel("Idle")
+        self._mirror_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
+        layout.addWidget(self._mirror_status_label)
+
+        # region Capture source — выбор монитора
+        source_group = QGroupBox("Capture")
+        source_layout = QVBoxLayout(source_group)
+
+        monitor_row = QHBoxLayout()
+        monitor_row.addWidget(QLabel("Monitor:"))
+        self._mirror_monitor_combo = QComboBox()
+        self._mirror_monitor_combo.currentIndexChanged.connect(
+            self._on_mirror_monitor_changed
+        )
+        monitor_row.addWidget(self._mirror_monitor_combo, stretch=1)
+        btn_refresh = QPushButton("Refresh")
+        btn_refresh.clicked.connect(self._populate_monitor_combo)
+        monitor_row.addWidget(btn_refresh)
+        source_layout.addLayout(monitor_row)
+        layout.addWidget(source_group)
+        # endregion
+
+        # region Tuning — edge depth, smoothing, fps
+        tuning_group = QGroupBox("Tuning")
+        tuning_layout = QVBoxLayout(tuning_group)
+
+        # Edge depth — толщина полосы по краю экрана для sampling
+        self._mirror_edge_slider, self._mirror_edge_label = self._make_slider(
+            "Edge", 8, self._on_mirror_edge_changed
+        )
+        self._mirror_edge_slider.setRange(2, 20)
+        self._mirror_edge_label.setText("8%")
+        edge_row = QHBoxLayout()
+        edge_row.addWidget(QLabel("Edge %"))
+        edge_row.addWidget(self._mirror_edge_slider)
+        self._mirror_edge_label.setFixedWidth(48)
+        self._mirror_edge_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        edge_row.addWidget(self._mirror_edge_label)
+        tuning_layout.addLayout(edge_row)
+
+        # Smoothing — сглаживание между кадрами
+        self._mirror_smooth_slider, self._mirror_smooth_label = self._make_slider(
+            "Smooth", 35, self._on_mirror_smooth_changed
+        )
+        self._mirror_smooth_slider.setRange(0, 95)
+        self._mirror_smooth_label.setText("35%")
+        smooth_row = QHBoxLayout()
+        smooth_row.addWidget(QLabel("Smooth %"))
+        smooth_row.addWidget(self._mirror_smooth_slider)
+        self._mirror_smooth_label.setFixedWidth(48)
+        self._mirror_smooth_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        smooth_row.addWidget(self._mirror_smooth_label)
+        tuning_layout.addLayout(smooth_row)
+
+        # Saturation — усиление насыщенности (план 3.4)
+        self._mirror_sat_slider, self._mirror_sat_label = self._make_slider(
+            "Sat", 130, self._on_mirror_sat_changed
+        )
+        self._mirror_sat_slider.setRange(50, 250)
+        self._mirror_sat_label.setText("1.3x")
+        sat_row = QHBoxLayout()
+        sat_row.addWidget(QLabel("Saturation"))
+        sat_row.addWidget(self._mirror_sat_slider)
+        self._mirror_sat_label.setFixedWidth(48)
+        self._mirror_sat_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        sat_row.addWidget(self._mirror_sat_label)
+        tuning_layout.addLayout(sat_row)
+
+        # FPS — частота кадров mirroring
+        self._mirror_fps_slider, self._mirror_fps_label = self._make_slider(
+            "FPS", 15, self._on_mirror_fps_changed
+        )
+        self._mirror_fps_slider.setRange(5, 30)
+        self._mirror_fps_label.setText("15")
+        fps_row = QHBoxLayout()
+        fps_row.addWidget(QLabel("FPS"))
+        fps_row.addWidget(self._mirror_fps_slider)
+        self._mirror_fps_label.setFixedWidth(48)
+        self._mirror_fps_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        fps_row.addWidget(self._mirror_fps_label)
+        tuning_layout.addLayout(fps_row)
+
+        layout.addWidget(tuning_group)
+        # endregion
+
+        # region Start / Stop кнопки
+        btn_row = QHBoxLayout()
+        self._btn_mirror_start = QPushButton("Start")
+        self._btn_mirror_start.setFixedHeight(36)
+        self._btn_mirror_start.setStyleSheet(
+            "background-color: #2d8c2d; color: white; font-weight: bold; border-radius: 6px;"
+        )
+        self._btn_mirror_start.clicked.connect(self._start_screen_mirroring)
+        btn_row.addWidget(self._btn_mirror_start)
+
+        self._btn_mirror_stop = QPushButton("Stop")
+        self._btn_mirror_stop.setFixedHeight(36)
+        self._btn_mirror_stop.setStyleSheet(
+            "background-color: #cc3333; color: white; font-weight: bold; border-radius: 6px;"
+        )
+        self._btn_mirror_stop.setEnabled(False)
+        self._btn_mirror_stop.clicked.connect(self._stop_screen_mirroring)
+        btn_row.addWidget(self._btn_mirror_stop)
+        layout.addLayout(btn_row)
+        # endregion
+
+        layout.addStretch()
+        # Заполняем список мониторов при создании вкладки
+        self._populate_monitor_combo()
+
+    # region Screen Mirror helpers
+
+    def _populate_monitor_combo(self):
+        """Обновляет список доступных мониторов через mss."""
+        prev = self._mirror_monitor_combo.currentData()
+        self._mirror_monitor_combo.blockSignals(True)
+        self._mirror_monitor_combo.clear()
+        try:
+            import mss
+            with mss.mss() as sct:
+                for idx, mon in enumerate(sct.monitors[1:], start=1):
+                    w = int(mon.get("width", 0))
+                    h = int(mon.get("height", 0))
+                    self._mirror_monitor_combo.addItem(
+                        f"{idx}: {w}x{h}", idx
+                    )
+        except Exception as e:
+            self._mirror_monitor_combo.addItem(f"Error: {e}", 1)
+        # Восстанавливаем предыдущий выбор если возможно
+        if prev is not None:
+            for i in range(self._mirror_monitor_combo.count()):
+                if self._mirror_monitor_combo.itemData(i) == prev:
+                    self._mirror_monitor_combo.setCurrentIndex(i)
+                    break
+        self._mirror_monitor_combo.blockSignals(False)
+
+    def _mirror_monitor_index(self):
+        """Выбранный monitor index (1-based, как в mss)."""
+        d = self._mirror_monitor_combo.currentData()
+        return int(d) if d is not None else 1
+
+    def _mirror_edge_fraction(self):
+        """Текущее значение edge depth как доля (0.02..0.20)."""
+        return self._mirror_edge_slider.value() / 100.0
+
+    def _mirror_smoothing_factor(self):
+        """Текущее значение smoothing (0.0..0.95)."""
+        return self._mirror_smooth_slider.value() / 100.0
+
+    def _mirror_saturation_boost(self):
+        """Текущее значение saturation boost (0.5..2.5)."""
+        return self._mirror_sat_slider.value() / 100.0
+
+    def _mirror_interval_ms(self):
+        """Интервал таймера mirroring по текущему FPS."""
+        fps = max(1, int(self._mirror_fps_slider.value()))
+        return max(1, int(1000 / fps))
+
+    def _update_mirror_status(self, text, color="#9399b2"):
+        """Обновляет статус-label на вкладке Screen Mirror."""
+        self._mirror_status_label.setText(text)
+        self._mirror_status_label.setStyleSheet(
+            f"color: {color}; font-weight: bold;"
+        )
+
+    def _rebuild_mirror_engine(self):
+        """Создаёт или пересоздаёт engine на основе текущих настроек UI."""
+        if self._screen_mirror_engine is not None:
+            self._screen_mirror_engine.close()
+        self._screen_mirror_engine = ScreenMirrorEngine(
+            config=self._led_config_panel.config,
+            monitor_index=self._mirror_monitor_index(),
+            edge_fraction=self._mirror_edge_fraction(),
+            smoothing_factor=self._mirror_smoothing_factor(),
+            saturation_boost=self._mirror_saturation_boost(),
+        )
+        self._screen_mirror_engine.rebuild_layout()
+
+    def _start_screen_mirroring(self):
+        """Запускает screen mirroring: создаёт engine, стартует таймер кадров."""
+        if not self._driver.connected:
+            QMessageBox.warning(self, "Not connected",
+                                "Connect to the controller first.")
+            return
+        try:
+            self._rebuild_mirror_engine()
+        except Exception as e:
+            self._update_mirror_status(f"Error: {e}", "#f38ba8")
+            return
+
+        self._screen_mirroring_active = True
+        # Убираем solid color, чтобы per-LED не конфликтовал
+        self._driver.set_color(0, 0, 0)
+        self._screen_mirror_timer.start(self._mirror_interval_ms())
+        self._btn_mirror_start.setEnabled(False)
+        self._btn_mirror_stop.setEnabled(True)
+        self._update_mirror_status("Running", "#2d8c2d")
+        # Первый кадр сразу
+        self._tick_screen_mirroring()
+
+    def _stop_screen_mirroring(self, restore_output=True):
+        """Останавливает screen mirroring и при необходимости возвращает вывод."""
+        self._screen_mirror_timer.stop()
+        self._screen_mirroring_active = False
+        if self._screen_mirror_engine is not None:
+            self._screen_mirror_engine.close()
+            self._screen_mirror_engine = None
+        self._btn_mirror_start.setEnabled(True)
+        self._btn_mirror_stop.setEnabled(False)
+        self._update_mirror_status("Idle")
+        if restore_output and self._driver.connected:
+            if self._current_tab == 0:
+                self._driver.set_color(self._r, self._g, self._b)
+            else:
+                self._driver.set_color(0, 0, 0)
+
+    def _tick_screen_mirroring(self):
+        """Один кадр mirroring: capture → sample → send per-LED."""
+        if not self._screen_mirroring_active or self._screen_mirror_engine is None:
+            return
+        try:
+            result = self._screen_mirror_engine.process_next_frame()
+            self._driver.set_per_led_colors(result.sampled.physical_colors)
+        except Exception as e:
+            self._stop_screen_mirroring(restore_output=False)
+            self._update_mirror_status(f"Error: {e}", "#f38ba8")
+
+    def _on_mirror_monitor_changed(self, index):
+        """При смене монитора перестраиваем engine если mirroring активен."""
+        if self._screen_mirroring_active:
+            try:
+                self._rebuild_mirror_engine()
+            except Exception:
+                self._stop_screen_mirroring(restore_output=False)
+
+    def _on_mirror_edge_changed(self):
+        """Обновляет label и live-применяет edge depth в engine."""
+        self._mirror_edge_label.setText(f"{self._mirror_edge_slider.value()}%")
+        if self._screen_mirroring_active and self._screen_mirror_engine:
+            try:
+                self._screen_mirror_engine.set_edge_fraction(
+                    self._mirror_edge_fraction()
+                )
+            except Exception:
+                pass
+
+    def _on_mirror_smooth_changed(self):
+        """Обновляет label и live-применяет smoothing в engine."""
+        self._mirror_smooth_label.setText(f"{self._mirror_smooth_slider.value()}%")
+        if self._screen_mirroring_active and self._screen_mirror_engine:
+            self._screen_mirror_engine.set_smoothing_factor(
+                self._mirror_smoothing_factor()
+            )
+
+    def _on_mirror_sat_changed(self):
+        """Обновляет label и live-применяет saturation boost в engine."""
+        val = self._mirror_sat_slider.value() / 100.0
+        self._mirror_sat_label.setText(f"{val:.1f}x")
+        if self._screen_mirroring_active and self._screen_mirror_engine:
+            self._screen_mirror_engine.set_saturation_boost(val)
+
+    def _on_mirror_fps_changed(self):
+        """Обновляет label и перестраивает интервал таймера."""
+        self._mirror_fps_label.setText(str(self._mirror_fps_slider.value()))
+        if self._screen_mirroring_active:
+            self._screen_mirror_timer.start(self._mirror_interval_ms())
+
+    # endregion
+
     def _load_preset_to_ui(self):
         """Загружает сохранённый preset в UI (цвет, яркость, sliders)."""
         r, g, b = self._color_preset.as_tuple()
@@ -274,8 +561,9 @@ class MainWindow(QMainWindow):
     def _on_tab_changed(self, index):
         """
         Обработчик переключения вкладок.
-        0 = Color tab: восстанавливаем solid color preset
-        1 = LED Config tab: останавливаем solid color (лента гаснет или ждёт Live Preview)
+        0 = Color: восстанавливаем solid color preset
+        1 = LED Config: гасим вывод, ждём Live Preview / Confirm
+        2 = Screen Mirror: гасим solid, mirroring стартует кнопкой
         """
         prev_tab = self._current_tab
         self._current_tab = index
@@ -283,21 +571,23 @@ class MainWindow(QMainWindow):
         if not self._driver.connected:
             return
 
+        # При уходе с вкладки Screen Mirror — останавливаем mirroring
+        if prev_tab == 2 and index != 2:
+            self._stop_screen_mirroring(restore_output=False)
+
         if index == 0:  # Возврат на Color tab
-            if prev_tab == 1:  # Был в LED Config
-                # Восстанавливаем последний solid color preset
-                r, g, b = self._color_preset.as_tuple()
-                self._driver.set_color(r, g, b)
-                self._driver.set_brightness(self._color_preset.brightness)
+            r, g, b = self._color_preset.as_tuple()
+            self._driver.set_color(r, g, b)
+            self._driver.set_brightness(self._color_preset.brightness)
         elif index == 1:  # Переход в LED Config
-            # Останавливаем solid color (лента гаснет)
+            self._driver.set_color(0, 0, 0)
+        elif index == 2:  # Переход в Screen Mirror
             self._driver.set_color(0, 0, 0)
 
     def _on_led_config_confirmed(self):
         """
         Вызывается при нажатии Confirm в LED Config.
-        Пока per-LED не работает (требует SyncConfig handshake),
-        просто гасим ленту после сохранения.
+        Сохраняет конфиг. Если mirroring активен — перестраивает layout.
         """
         cfg = self._led_config_panel.config
         print(f"[UI] LED config saved: {cfg.total} LEDs")
@@ -306,7 +596,15 @@ class MainWindow(QMainWindow):
         if not self._driver.connected:
             return
 
-        # После Confirm гасим ленту (до выхода из LED Config)
+        # Если mirroring активен — пересобираем engine с новым конфигом
+        if self._screen_mirroring_active:
+            try:
+                self._rebuild_mirror_engine()
+            except Exception:
+                pass
+            return
+
+        # Иначе гасим ленту (до выхода из LED Config)
         self._driver.set_color(0, 0, 0)
 
     def _make_slider(self, name, initial, callback):
@@ -421,6 +719,7 @@ class MainWindow(QMainWindow):
     def _on_disconnect(self):
         """Отключение от контроллера."""
         self._is_auto_connecting = False
+        self._stop_screen_mirroring(restore_output=False)
         self._driver.disconnect()
         self._status_label.setText("Disconnected")
         self._status_label.setStyleSheet("color: #cc3333; font-weight: bold;")
@@ -469,14 +768,15 @@ class MainWindow(QMainWindow):
         # Сохраняем preset
         self._color_preset.set_color(self._r, self._g, self._b)
         self._color_preset.save()
-        # Отправляем только если на Color tab
-        if self._driver.connected and self._current_tab == 0:
+        # Отправляем только если на Color tab и mirroring не активен
+        if self._driver.connected and self._current_tab == 0 and not self._screen_mirroring_active:
             self._driver.set_color(self._r, self._g, self._b)
 
     # endregion
 
     def closeEvent(self, event):
-        """При закрытии окна отключаемся от контроллера."""
+        """При закрытии окна останавливаем mirroring и отключаемся."""
+        self._stop_screen_mirroring(restore_output=False)
         if self._driver.connected:
             self._driver.disconnect()
         event.accept()

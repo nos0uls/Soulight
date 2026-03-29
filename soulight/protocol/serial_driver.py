@@ -193,10 +193,21 @@ class LEDDriver:
         except Exception:
             pass
 
-        # Switch ON
+        # Яркость 0 ПЕРЕД включением — предотвращает вспышку при старте.
+        # Контроллер запоминает последнее состояние; без этого switch ON
+        # кратковременно показывает старый цвет на полной яркости.
+        bright_zero = self._bridge.make_bright_packet(0)
+        self._safe_write(bright_zero)
+        time.sleep(0.02)
+
+        # Switch ON (лента включается, но с яркостью 0 — темно)
         pkt = self._bridge.make_switch_packet(True)
         self._safe_write(pkt)
-        time.sleep(0.05)
+        time.sleep(0.02)
+
+        # Повторяем яркость 0 для надёжности
+        self._safe_write(bright_zero)
+        time.sleep(0.02)
 
         # PC mode
         pkt = self._bridge.make_workmode_pc_packet()
@@ -259,12 +270,22 @@ class LEDDriver:
     def _safe_write(self, data):
         """
         Потокобезопасная отправка данных через serial.
+        Пакеты с frame header (55 AA 5A) отправляются двумя частями:
+        сначала 5-байтный заголовок, потом payload — контроллер ожидает
+        именно такую последовательность (подтверждено capture анализом).
         Игнорирует None data и ошибки записи.
         """
         if data is None or self._serial is None or not self._serial.is_open:
             return
         try:
             with self._write_lock:
-                self._serial.write(data)
+                # Разделяем frame header и payload для корректного приёма
+                if len(data) > 5 and data[:3] == b'\x55\xAA\x5A':
+                    self._serial.write(data[:5])
+                    self._serial.flush()
+                    time.sleep(0.003)
+                    self._serial.write(data[5:])
+                else:
+                    self._serial.write(data)
         except Exception:
             pass

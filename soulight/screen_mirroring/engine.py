@@ -42,12 +42,19 @@ class ScreenMirrorEngine:
         monitor_index: int = 1,
         edge_fraction: float = 0.08,
         smoothing_factor: float = 0.35,
+        saturation_boost: float = 1.3,
     ):
         self._config = config
         self._capturer = ScreenCapturer(monitor_index=monitor_index)
         self._edge_fraction = float(edge_fraction)
         self._smoother = FrameSmoother(factor=smoothing_factor)
+        self._saturation_boost = float(saturation_boost)
         self._layout: Optional[ScreenMirrorLayout] = None
+
+    # Закрывает ресурсы (mss instance внутри capturer).
+    # Вызывать при остановке mirroring.
+    def close(self):
+        self._capturer.close()
 
     @property
     def layout(self) -> Optional[ScreenMirrorLayout]:
@@ -81,7 +88,12 @@ class ScreenMirrorEngine:
             self.rebuild_layout()
 
         frame = self._capturer.capture()
-        sampled = sample_frame(frame=frame, layout=self._layout, smoother=self._smoother)
+        sampled = sample_frame(
+            frame=frame,
+            layout=self._layout,
+            smoother=self._smoother,
+            saturation_boost=self._saturation_boost,
+        )
         rgb_bytes = flatten_rgb(sampled.physical_colors)
         return MirroringFrameResult(
             layout=self._layout,
@@ -99,3 +111,7 @@ class ScreenMirrorEngine:
     def set_edge_fraction(self, value: float) -> None:
         self._edge_fraction = float(value)
         self.rebuild_layout()
+
+    # Насыщенность: 1.0 = без изменений, >1.0 = ярче, <1.0 = бледнее.
+    def set_saturation_boost(self, value: float) -> None:
+        self._saturation_boost = float(value)

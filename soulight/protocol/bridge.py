@@ -235,6 +235,9 @@ class BeelightBridge:
         """
         Генерирует wire-format пакет для per-LED управления.
         colors_rgb — список туплов [(r, g, b), ...] для каждого LED.
+        Массив автоматически реверсируется, т.к. контроллер адресует LED
+        с конца ленты (LED[0] в пакете = последний LED на ленте).
+        channelMark=0xFF обязателен для принятия контроллером.
         Возвращает bytes или None.
         """
         if (not self._ready or self._gen_rgb_transfer is None
@@ -245,6 +248,8 @@ class BeelightBridge:
             from System.Reflection import BindingFlags
             from System.Runtime.Serialization import FormatterServices
 
+            # Реверсируем порядок LED: контроллер адресует с конца ленты
+            colors_rgb = list(reversed(colors_rgb))
             n = len(colors_rgb)
             arr = Array.CreateInstance(self._rgb_type, n)
 
@@ -260,7 +265,8 @@ class BeelightBridge:
                 field_b.SetValue(rgb, NetByte(int(bv)))
                 arr.SetValue(rgb, i)
 
-            result = self._gen_rgb_transfer.Invoke(None, [arr, Byte(0)])
+            # channelMark=0xFF — обязателен для принятия контроллером
+            result = self._gen_rgb_transfer.Invoke(None, [arr, Byte(0xFF)])
             return bytes(result) if result is not None else None
         except Exception as e:
             print(f"[Bridge] make_rgb_transfer_packet error: {e}")

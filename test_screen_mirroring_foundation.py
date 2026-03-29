@@ -6,6 +6,8 @@
 
 import sys
 
+import numpy as np
+
 sys.path.insert(0, ".")
 
 from soulight.led_config import LEDConfig, SIDE_TOP, SIDE_BOTTOM, SIDE_LEFT, SIDE_RIGHT
@@ -60,8 +62,8 @@ def main():
     if layout.physical_led_count != 4:
         raise AssertionError(f"Expected 4 physical LEDs, got {layout.physical_led_count}")
 
-    # Чёрный фон кадра.
-    bgra = bytearray(width * height * 4)
+    # Чёрный фон кадра (numpy BGRA array).
+    bgra = np.zeros((height, width, 4), dtype=np.uint8)
 
     expected_logical = [
         (255, 0, 0),
@@ -71,9 +73,11 @@ def main():
     # Красим sampling-зоны в заранее известные цвета.
     # Так sampler должен вернуть их без изменений.
     for led, color in zip(layout.leds, expected_logical):
-        fill_rect(bgra, width, led.sample_rect, color)
+        r, g, b = color
+        rect = led.sample_rect
+        bgra[rect.y:rect.y + rect.height, rect.x:rect.x + rect.width] = [b, g, r, 255]
 
-    frame = CaptureFrame(width=width, height=height, bgra=bytes(bgra))
+    frame = CaptureFrame(width=width, height=height, bgra=bgra)
     sampled = sample_frame(frame=frame, layout=layout, smoother=None)
 
     print(f"[Foundation] logical_colors = {sampled.logical_colors}")
@@ -84,11 +88,12 @@ def main():
             f"Logical colors mismatch. Expected {expected_logical}, got {sampled.logical_colors}"
         )
 
+    # Offset чёрные LED теперь в конце буфера (после bridge reverse они окажутся в начале ленты).
     expected_physical = [
-        (0, 0, 0),
-        (0, 0, 0),
         (255, 0, 0),
         (0, 255, 0),
+        (0, 0, 0),
+        (0, 0, 0),
     ]
     if sampled.physical_colors != expected_physical:
         raise AssertionError(
