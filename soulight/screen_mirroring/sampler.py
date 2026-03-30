@@ -9,6 +9,7 @@
 # - start_offset превращается в чёрные LED в начале физического буфера
 # - smoothing работает как blend между предыдущим и текущим кадром
 
+import colorsys
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence, Tuple
 
@@ -32,7 +33,7 @@ class FrameSmoother:
     def __init__(self, factor: float = 0.35):
         self._factor = 0.0
         self.factor = factor
-        self._previous: Optional[List[Tuple[int, int, int]]] = None
+        self._prev_np: Optional[np.ndarray] = None  # shape (N, 3) float32
 
     @property
     def factor(self) -> float:
@@ -47,33 +48,27 @@ class FrameSmoother:
     # Сбрасываем историю, чтобы следующий кадр не смешивался со старым состоянием.
     # Это полезно при смене монитора, layout или режима mirroring.
     def reset(self) -> None:
-        self._previous = None
+        self._prev_np = None
 
     # Применяем сглаживание к новому списку цветов.
     # factor=0.0 означает мгновенную реакцию.
     # factor=1.0 означает фактически полную инерцию.
     def apply(self, colors: Sequence[Tuple[int, int, int]]) -> List[Tuple[int, int, int]]:
-        current = [tuple(map(int, color)) for color in colors]
-        if self._previous is None or self._factor <= 0.0:
-            self._previous = list(current)
-            return list(current)
+        # numpy vectorized blend — на порядки быстрее поэлементного Python-цикла.
+        current = np.array(colors, dtype=np.float32)
+        if self._prev_np is None or self._factor <= 0.0:
+            self._prev_np = current.copy()
+            return [tuple(int(v) for v in row) for row in current]
 
-        if len(self._previous) != len(current):
-            self._previous = list(current)
-            return list(current)
+        if self._prev_np.shape != current.shape:
+            self._prev_np = current.copy()
+            return [tuple(int(v) for v in row) for row in current]
 
-        out: List[Tuple[int, int, int]] = []
-        keep = self._factor
-        take = 1.0 - keep
-
-        for (pr, pg, pb), (cr, cg, cb) in zip(self._previous, current):
-            nr = int(pr * keep + cr * take)
-            ng = int(pg * keep + cg * take)
-            nb = int(pb * keep + cb * take)
-            out.append((_clamp(nr), _clamp(ng), _clamp(nb)))
-
-        self._previous = list(out)
-        return out
+        # Weighted blend: prev * keep + current * (1 - keep)
+        blended = self._prev_np * self._factor + current * (1.0 - self._factor)
+        np.clip(blended, 0, 255, out=blended)
+        self._prev_np = blended.copy()
+        return [tuple(int(v) for v in row) for row in blended]
 
 
 # Эта функция делает полный sampling одного кадра.
@@ -119,12 +114,9 @@ def sample_frame(
 # Эта функция превращает список RGB-кортежей в плоский byte buffer.
 # Такой буфер потом удобно передать в helper для SyncRGB или другой packet generator.
 def flatten_rgb(colors: Iterable[Tuple[int, int, int]]) -> bytes:
-    out = bytearray()
-    for r, g, b in colors:
-        out.append(_clamp(r))
-        out.append(_clamp(g))
-        out.append(_clamp(b))
-    return bytes(out)
+    # numpy vectorized — быстрее чем Python loop + bytearray.append
+    arr = np.array(list(colors), dtype=np.uint8)
+    return bytes(arr.flatten())
 
 
 # Эта функция считает средний RGB цвет прямоугольника внутри BGRA numpy-кадра.
@@ -160,7 +152,6 @@ def _clamp(value: int) -> int:
 def _boost_saturation(r: int, g: int, b: int, boost: float) -> Tuple[int, int, int]:
     if boost == 1.0:
         return (r, g, b)
-    import colorsys
     h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
     s = min(1.0, s * boost)
     nr, ng, nb = colorsys.hsv_to_rgb(h, s, v)

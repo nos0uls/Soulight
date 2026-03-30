@@ -76,8 +76,9 @@ class ScreenCapturer:
         self._ensure_sct()
         monitor = self._get_monitor(self._sct)
         shot = self._sct.grab(monitor)
-        # numpy array из BGRA данных — без лишних копирований
-        bgra = np.frombuffer(bytes(shot.bgra), dtype=np.uint8).reshape(
+        # np.array(shot) — mss ScreenShot поддерживает __array_interface__,
+        # что позволяет numpy создать array напрямую без промежуточного bytes().
+        bgra = np.array(shot, dtype=np.uint8).reshape(
             (int(shot.height), int(shot.width), 4)
         )
         return CaptureFrame(

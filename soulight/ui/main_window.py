@@ -10,13 +10,16 @@ from PyQt6.QtWidgets import (
     QGroupBox, QFrame, QSizePolicy, QMessageBox, QTabWidget,
     QComboBox,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QThread, QMetaObject, Q_ARG, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QLinearGradient, QMouseEvent, QFont
 
+from soulight.led_config import SIDE_COLORS, MAX_LEDS
 from soulight.protocol.serial_driver import LEDDriver
 from soulight.ui.led_config_widget import LEDConfigPanel
 from soulight.color_preset import ColorPreset
 from soulight.screen_mirroring.engine import ScreenMirrorEngine
+from soulight.screen_mirroring.layout import build_layout
+from soulight.screen_mirroring.worker import MirrorWorker
 
 
 # region Пресеты цветов — быстрые кнопки для частых цветов
@@ -98,11 +101,19 @@ class MainWindow(QMainWindow):
         self._auto_connect_max_attempts = 5
         self._auto_connect_delay_ms = 1000
         self._is_auto_connecting = False
-        # Screen mirroring: engine создаётся при старте, таймер тикает кадры
+        # Screen mirroring: engine + background thread для capture/sample
         self._screen_mirror_engine = None
         self._screen_mirroring_active = False
         self._screen_mirror_timer = QTimer()
         self._screen_mirror_timer.timeout.connect(self._tick_screen_mirroring)
+        self._mirror_restart_timer = QTimer()
+        self._mirror_restart_timer.setSingleShot(True)
+        self._mirror_restart_timer.setInterval(150)
+        self._mirror_restart_timer.timeout.connect(self._restart_screen_mirroring)
+        # Background thread: capture + sampling выполняются здесь, не в UI thread
+        self._mirror_thread = None   # QThread
+        self._mirror_worker = None   # MirrorWorker
+        self._mirror_frame_pending = False  # Защита от накопления запросов
         # Текущие RGB значения
         self._r = 255
         self._g = 0
@@ -448,8 +459,52 @@ class MainWindow(QMainWindow):
         )
         self._screen_mirror_engine.rebuild_layout()
 
+    def _restart_screen_mirroring(self):
+        """
+        Безопасно перезапускает mirroring.
+        Это нужно для настроек, которые требуют новый engine/monitor/layout.
+        """
+        if not self._screen_mirroring_active:
+            return
+        self._stop_screen_mirroring(restore_output=False)
+        self._start_screen_mirroring()
+
+    def _queue_mirror_restart(self):
+        """
+        Планирует короткий debounce-restart mirroring.
+        Это убирает race между UI thread и worker thread при rebuild layout/engine,
+        и не дёргает stop/start на каждый тик слайдера.
+        """
+        if not self._screen_mirroring_active:
+            return
+        self._mirror_restart_timer.start()
+
+    def _send_led_config_preview(self):
+        """
+        Отправляет на ленту preview раскладки из LED Config.
+        Цвет каждой стороны берётся из SIDE_COLORS, выключенные LED — чёрные.
+        """
+        if not self._driver.connected:
+            return
+
+        cfg = self._led_config_panel.config
+        if cfg.total + cfg.start_offset > MAX_LEDS:
+            return
+
+        # Для preview нужен только порядок LED, поэтому геометрия экрана условная.
+        layout = build_layout(cfg, capture_width=100, capture_height=100, edge_fraction=0.08)
+        colors = [(0, 0, 0)] * layout.physical_led_count
+        for led in layout.leds:
+            if led.enabled:
+                colors[led.physical_index] = SIDE_COLORS.get(led.side, (255, 255, 255))
+        self._driver.set_per_led_colors(colors)
+
     def _start_screen_mirroring(self):
-        """Запускает screen mirroring: создаёт engine, стартует таймер кадров."""
+        """
+        Запускает screen mirroring: создаёт engine, background thread, таймер.
+        Capture + sampling выполняются в отдельном потоке через MirrorWorker,
+        чтобы UI оставался отзывчивым.
+        """
         if not self._driver.connected:
             QMessageBox.warning(self, "Not connected",
                                 "Connect to the controller first.")
@@ -460,20 +515,47 @@ class MainWindow(QMainWindow):
             self._update_mirror_status(f"Error: {e}", "#f38ba8")
             return
 
+        # Создаём background thread и worker
+        self._mirror_thread = QThread()
+        self._mirror_worker = MirrorWorker()
+        self._mirror_worker.engine = self._screen_mirror_engine
+        self._mirror_worker.moveToThread(self._mirror_thread)
+        # Сигналы: worker → UI thread (thread-safe через Qt signal queue)
+        self._mirror_worker.frame_ready.connect(self._on_mirror_frame_ready)
+        self._mirror_worker.error_occurred.connect(self._on_mirror_error)
+        self._mirror_thread.finished.connect(self._mirror_worker.deleteLater)
+        self._mirror_thread.start()
+
         self._screen_mirroring_active = True
+        self._mirror_frame_pending = False
+        # Убираем фокус с editable widgets, чтобы мигающий caret не попадал в capture.
+        focus_widget = self.focusWidget()
+        if focus_widget is not None:
+            focus_widget.clearFocus()
         # Убираем solid color, чтобы per-LED не конфликтовал
         self._driver.set_color(0, 0, 0)
         self._screen_mirror_timer.start(self._mirror_interval_ms())
         self._btn_mirror_start.setEnabled(False)
         self._btn_mirror_stop.setEnabled(True)
         self._update_mirror_status("Running", "#2d8c2d")
+        self._btn_mirror_stop.setFocus()
         # Первый кадр сразу
         self._tick_screen_mirroring()
 
     def _stop_screen_mirroring(self, restore_output=True):
-        """Останавливает screen mirroring и при необходимости возвращает вывод."""
+        """Останавливает screen mirroring: таймер, thread, engine."""
+        self._mirror_restart_timer.stop()
         self._screen_mirror_timer.stop()
         self._screen_mirroring_active = False
+
+        # Останавливаем background thread
+        if self._mirror_thread is not None:
+            self._mirror_thread.quit()
+            self._mirror_thread.wait(2000)
+            self._mirror_thread = None
+        self._mirror_worker = None
+        self._mirror_frame_pending = False
+
         if self._screen_mirror_engine is not None:
             self._screen_mirror_engine.close()
             self._screen_mirror_engine = None
@@ -487,21 +569,39 @@ class MainWindow(QMainWindow):
                 self._driver.set_color(0, 0, 0)
 
     def _tick_screen_mirroring(self):
-        """Один кадр mirroring: capture → sample → send per-LED."""
-        if not self._screen_mirroring_active or self._screen_mirror_engine is None:
+        """
+        Таймер tick: запрашивает новый кадр у background worker.
+        Если предыдущий кадр ещё обрабатывается — пропускаем (frame drop).
+        """
+        if not self._screen_mirroring_active or self._mirror_worker is None:
             return
-        try:
-            result = self._screen_mirror_engine.process_next_frame()
-            self._driver.set_per_led_colors(result.sampled.physical_colors)
-        except Exception as e:
-            self._stop_screen_mirroring(restore_output=False)
-            self._update_mirror_status(f"Error: {e}", "#f38ba8")
+        if self._mirror_frame_pending:
+            return  # Worker ещё обрабатывает предыдущий кадр
+        self._mirror_frame_pending = True
+        # invokeMethod с QueuedConnection гарантирует выполнение в worker thread
+        QMetaObject.invokeMethod(self._mirror_worker, "process_frame")
+
+    def _on_mirror_frame_ready(self, physical_colors):
+        """
+        Slot: вызывается из worker thread когда кадр готов.
+        Отправляет цвета в LED driver (быстро, не блокирует UI).
+        """
+        self._mirror_frame_pending = False
+        if not self._screen_mirroring_active:
+            return
+        self._driver.set_per_led_colors(physical_colors)
+
+    def _on_mirror_error(self, error_msg):
+        """Slot: worker поймал ошибку при capture/sample."""
+        self._mirror_frame_pending = False
+        self._stop_screen_mirroring(restore_output=False)
+        self._update_mirror_status(f"Error: {error_msg}", "#f38ba8")
 
     def _on_mirror_monitor_changed(self, index):
         """При смене монитора перестраиваем engine если mirroring активен."""
         if self._screen_mirroring_active:
             try:
-                self._rebuild_mirror_engine()
+                self._queue_mirror_restart()
             except Exception:
                 self._stop_screen_mirroring(restore_output=False)
 
@@ -510,9 +610,7 @@ class MainWindow(QMainWindow):
         self._mirror_edge_label.setText(f"{self._mirror_edge_slider.value()}%")
         if self._screen_mirroring_active and self._screen_mirror_engine:
             try:
-                self._screen_mirror_engine.set_edge_fraction(
-                    self._mirror_edge_fraction()
-                )
+                self._queue_mirror_restart()
             except Exception:
                 pass
 
@@ -580,7 +678,10 @@ class MainWindow(QMainWindow):
             self._driver.set_color(r, g, b)
             self._driver.set_brightness(self._color_preset.brightness)
         elif index == 1:  # Переход в LED Config
-            self._driver.set_color(0, 0, 0)
+            if self._led_config_panel.live_preview:
+                self._send_led_config_preview()
+            else:
+                self._driver.set_color(0, 0, 0)
         elif index == 2:  # Переход в Screen Mirror
             self._driver.set_color(0, 0, 0)
 
@@ -599,9 +700,14 @@ class MainWindow(QMainWindow):
         # Если mirroring активен — пересобираем engine с новым конфигом
         if self._screen_mirroring_active:
             try:
-                self._rebuild_mirror_engine()
+                self._queue_mirror_restart()
             except Exception:
                 pass
+            return
+
+        # На LED Config вкладке показываем живой preview раскладки.
+        if self._current_tab == 1:
+            self._send_led_config_preview()
             return
 
         # Иначе гасим ленту (до выхода из LED Config)
