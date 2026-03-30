@@ -7,10 +7,20 @@
 # CryptoObfuscator (обфускатор Beelight.exe) расшифровывает тела методов
 # автоматически при загрузке assembly — поэтому reflection работает.
 
+import clr
 import os
 import sys
-import clr  # pythonnet — мост Python ↔ .NET CLR
 
+# Аппаратный лимит контроллера.
+# Per-LED массив лучше всегда приводить к полной длине,
+# чтобы хвостовые LED не оставались со старым состоянием.
+MAX_PACKET_LEDS = 75
+
+# Путь к папке с Beelight.exe и зависимостями
+BRIDGE_DIR = os.path.join(
+    os.path.dirname(__file__),
+    '..', '..', 'bridge', 'Beelight'
+)
 # Путь к директории Beelight (содержит Beelight.exe и все DLL зависимости)
 BEELIGHT_DIR = r"C:\Program Files (x86)\Beelight\Beelight V3.0"
 BEELIGHT_EXE = os.path.join(BEELIGHT_DIR, "Beelight.exe")
@@ -237,6 +247,8 @@ class BeelightBridge:
         colors_rgb — список туплов [(r, g, b), ...] для каждого LED.
         Массив автоматически реверсируется, т.к. контроллер адресует LED
         с конца ленты (LED[0] в пакете = последний LED на ленте).
+        Массив приводится к полному аппаратному размеру 75 LED:
+        недостающий хвост заполняется чёрным, лишнее обрезается.
         channelMark=0xFF обязателен для принятия контроллером.
         Возвращает bytes или None.
         """
@@ -247,6 +259,12 @@ class BeelightBridge:
             from System import Array, Byte as NetByte
             from System.Reflection import BindingFlags
             from System.Runtime.Serialization import FormatterServices
+
+            # Контроллер ведёт себя стабильнее, когда получает полный буфер.
+            # Если прислать короткий массив, хвостовые LED могут сохранить старые цвета.
+            colors_rgb = list(colors_rgb[:MAX_PACKET_LEDS])
+            if len(colors_rgb) < MAX_PACKET_LEDS:
+                colors_rgb.extend([(0, 0, 0)] * (MAX_PACKET_LEDS - len(colors_rgb)))
 
             # Реверсируем порядок LED: контроллер адресует с конца ленты
             colors_rgb = list(reversed(colors_rgb))
