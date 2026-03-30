@@ -35,7 +35,8 @@ class ScreenCapturer:
         # В mss monitor[0] — это виртуальный общий desktop.
         # Для Ambilight нужен monitor[1+], то есть конкретный physical monitor.
         self._monitor_index = int(monitor_index)
-        # Переиспользуемый mss instance — создаётся лениво при первом capture.
+        # Persistent mss instance временно отключён.
+        # На этой Windows-конфигурации стабильнее создавать fresh mss() на каждый кадр.
         self._sct = None
 
     @property
@@ -44,31 +45,16 @@ class ScreenCapturer:
 
     # Закрывает mss instance. Вызывать при остановке mirroring или смене монитора.
     def close(self):
-        if self._sct is not None:
-            try:
-                self._sct.close()
-            except Exception:
-                pass
-            self._sct = None
-
-    # Лениво создаёт mss instance при первом обращении.
-    def _ensure_sct(self):
-        if self._sct is None:
-            import mss
-            self._sct = mss.mss()
+        # Сейчас persistent mss instance не используется.
+        self._sct = None
 
     # Этот метод возвращает реальную геометрию выбранного монитора.
     def get_monitor_geometry(self) -> MonitorGeometry:
-        # Важно: если persistent mss instance ещё не создан,
-        # не создаём его здесь в UI thread только ради geometry.
-        # Иначе потом worker thread попытается использовать тот же backend object,
-        # что на Windows ломает thread-local state внутри mss.
-        if self._sct is None:
-            import mss
-            with mss.mss() as temp_sct:
-                monitor = self._get_monitor(temp_sct)
-        else:
-            monitor = self._get_monitor(self._sct)
+        import mss
+        # Геометрию тоже читаем через временный mss(), чтобы lifecycle capture backend
+        # был полностью локален одному вызову и не переносился между кадрами/потоками.
+        with mss.mss() as temp_sct:
+            monitor = self._get_monitor(temp_sct)
         return MonitorGeometry(
             left=int(monitor["left"]),
             top=int(monitor["top"]),
@@ -79,11 +65,12 @@ class ScreenCapturer:
     # Этот метод делает один снимок экрана.
     # Возвращает numpy BGRA array для быстрого sampling.
     def capture(self) -> CaptureFrame:
+        import mss
         import numpy as np
 
-        self._ensure_sct()
-        monitor = self._get_monitor(self._sct)
-        shot = self._sct.grab(monitor)
+        with mss.mss() as sct:
+            monitor = self._get_monitor(sct)
+            shot = sct.grab(monitor)
         # np.array(shot) — mss ScreenShot поддерживает __array_interface__,
         # что позволяет numpy создать array напрямую без промежуточного bytes().
         bgra = np.array(shot, dtype=np.uint8).reshape(
