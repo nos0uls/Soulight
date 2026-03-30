@@ -55,15 +55,20 @@ class ScreenCapturer:
     def _ensure_sct(self):
         if self._sct is None:
             import mss
-            # В этой Windows-сборке backend path с with_cursor=False нестабилен
-            # и может падать внутри mss на get_monitor_geometry()/grab().
-            # Поэтому используем обычный mss() без этого флага.
             self._sct = mss.mss()
 
     # Этот метод возвращает реальную геометрию выбранного монитора.
     def get_monitor_geometry(self) -> MonitorGeometry:
-        self._ensure_sct()
-        monitor = self._get_monitor(self._sct)
+        # Важно: если persistent mss instance ещё не создан,
+        # не создаём его здесь в UI thread только ради geometry.
+        # Иначе потом worker thread попытается использовать тот же backend object,
+        # что на Windows ломает thread-local state внутри mss.
+        if self._sct is None:
+            import mss
+            with mss.mss() as temp_sct:
+                monitor = self._get_monitor(temp_sct)
+        else:
+            monitor = self._get_monitor(self._sct)
         return MonitorGeometry(
             left=int(monitor["left"]),
             top=int(monitor["top"]),
