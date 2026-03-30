@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QFrame, QSizePolicy, QMessageBox, QTabWidget,
     QComboBox,
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, QMetaObject
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QLinearGradient, QMouseEvent, QFont
 
 from soulight.led_config import SIDE_COLORS, MAX_LEDS
@@ -69,6 +69,11 @@ class ColorPreview(QFrame):
 
 # region MainWindow — главное окно приложения
 class MainWindow(QMainWindow):
+    # Сигналы для общения с worker thread.
+    # Используем их вместо invokeMethod, чтобы Qt гарантированно делал queued call.
+    mirror_frame_requested = pyqtSignal()
+    mirror_shutdown_requested = pyqtSignal()
+
     """
     Главное окно Soulight.
 
@@ -513,6 +518,8 @@ class MainWindow(QMainWindow):
         # Сигналы: worker → UI thread (thread-safe через Qt signal queue)
         self._mirror_worker.frame_ready.connect(self._on_mirror_frame_ready)
         self._mirror_worker.error_occurred.connect(self._on_mirror_error)
+        self.mirror_frame_requested.connect(self._mirror_worker.process_frame)
+        self.mirror_shutdown_requested.connect(self._mirror_worker.shutdown)
         self._mirror_thread.finished.connect(self._mirror_worker.deleteLater)
         self._mirror_thread.start()
 
@@ -541,7 +548,7 @@ class MainWindow(QMainWindow):
         # Останавливаем background thread
         if self._mirror_thread is not None:
             if self._mirror_worker is not None:
-                QMetaObject.invokeMethod(self._mirror_worker, "shutdown")
+                self.mirror_shutdown_requested.emit()
             self._mirror_thread.quit()
             self._mirror_thread.wait(2000)
             self._mirror_thread = None
@@ -566,8 +573,8 @@ class MainWindow(QMainWindow):
         if self._mirror_frame_pending:
             return  # Worker ещё обрабатывает предыдущий кадр
         self._mirror_frame_pending = True
-        # invokeMethod с QueuedConnection гарантирует выполнение в worker thread
-        QMetaObject.invokeMethod(self._mirror_worker, "process_frame")
+        # queued signal-slot гарантирует выполнение process_frame в worker thread
+        self.mirror_frame_requested.emit()
 
     def _on_mirror_frame_ready(self, physical_colors):
         """
