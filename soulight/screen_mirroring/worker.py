@@ -29,17 +29,29 @@ class MirrorWorker(QObject):
     # Сигнал: произошла ошибка при обработке кадра
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, parent=None):
+    def __init__(
+        self,
+        config,
+        monitor_index,
+        edge_fraction,
+        smoothing_factor,
+        saturation_boost,
+        parent=None,
+    ):
         super().__init__(parent)
+        self._config = config
+        self._monitor_index = int(monitor_index)
+        self._edge_fraction = float(edge_fraction)
+        self._smoothing_factor = float(smoothing_factor)
+        self._saturation_boost = float(saturation_boost)
         self._engine: ScreenMirrorEngine = None
 
-    @property
-    def engine(self) -> ScreenMirrorEngine:
-        return self._engine
-
-    @engine.setter
-    def engine(self, value: ScreenMirrorEngine):
-        self._engine = value
+    @pyqtSlot()
+    def shutdown(self):
+        """Закрывает engine и его ресурсы в контексте worker thread."""
+        if self._engine is not None:
+            self._engine.close()
+            self._engine = None
 
     @pyqtSlot()
     def process_frame(self):
@@ -47,9 +59,20 @@ class MirrorWorker(QObject):
         Вызывается по сигналу из UI thread.
         Делает capture + sample в background thread и эмитит результат.
         """
-        if self._engine is None:
-            return
         try:
+            if self._engine is None:
+                # Engine создаётся лениво ПРЯМО в worker thread.
+                # Это важно для Windows backend mss: capture object должен жить
+                # в том же потоке, где потом используется.
+                self._engine = ScreenMirrorEngine(
+                    config=self._config,
+                    monitor_index=self._monitor_index,
+                    edge_fraction=self._edge_fraction,
+                    smoothing_factor=self._smoothing_factor,
+                    saturation_boost=self._saturation_boost,
+                )
+                self._engine.rebuild_layout()
+
             result = self._engine.process_next_frame()
             # Отправляем physical_colors в UI thread
             self.frame_ready.emit(result.sampled.physical_colors)

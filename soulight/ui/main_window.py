@@ -17,7 +17,6 @@ from soulight.led_config import SIDE_COLORS, MAX_LEDS
 from soulight.protocol.serial_driver import LEDDriver
 from soulight.ui.led_config_widget import LEDConfigPanel
 from soulight.color_preset import ColorPreset
-from soulight.screen_mirroring.engine import ScreenMirrorEngine
 from soulight.screen_mirroring.layout import build_layout
 from soulight.screen_mirroring.worker import MirrorWorker
 
@@ -447,17 +446,14 @@ class MainWindow(QMainWindow):
         )
 
     def _rebuild_mirror_engine(self):
-        """Создаёт или пересоздаёт engine на основе текущих настроек UI."""
-        if self._screen_mirror_engine is not None:
-            self._screen_mirror_engine.close()
-        self._screen_mirror_engine = ScreenMirrorEngine(
-            config=self._led_config_panel.config,
-            monitor_index=self._mirror_monitor_index(),
-            edge_fraction=self._mirror_edge_fraction(),
-            smoothing_factor=self._mirror_smoothing_factor(),
-            saturation_boost=self._mirror_saturation_boost(),
-        )
-        self._screen_mirror_engine.rebuild_layout()
+        """Собирает snapshot текущих mirroring-настроек для worker thread."""
+        return {
+            "config": self._led_config_panel.config,
+            "monitor_index": self._mirror_monitor_index(),
+            "edge_fraction": self._mirror_edge_fraction(),
+            "smoothing_factor": self._mirror_smoothing_factor(),
+            "saturation_boost": self._mirror_saturation_boost(),
+        }
 
     def _restart_screen_mirroring(self):
         """
@@ -509,16 +505,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Not connected",
                                 "Connect to the controller first.")
             return
-        try:
-            self._rebuild_mirror_engine()
-        except Exception as e:
-            self._update_mirror_status(f"Error: {e}", "#f38ba8")
-            return
-
         # Создаём background thread и worker
         self._mirror_thread = QThread()
-        self._mirror_worker = MirrorWorker()
-        self._mirror_worker.engine = self._screen_mirror_engine
+        worker_args = self._rebuild_mirror_engine()
+        self._mirror_worker = MirrorWorker(**worker_args)
         self._mirror_worker.moveToThread(self._mirror_thread)
         # Сигналы: worker → UI thread (thread-safe через Qt signal queue)
         self._mirror_worker.frame_ready.connect(self._on_mirror_frame_ready)
@@ -550,15 +540,13 @@ class MainWindow(QMainWindow):
 
         # Останавливаем background thread
         if self._mirror_thread is not None:
+            if self._mirror_worker is not None:
+                QMetaObject.invokeMethod(self._mirror_worker, "shutdown")
             self._mirror_thread.quit()
             self._mirror_thread.wait(2000)
             self._mirror_thread = None
         self._mirror_worker = None
         self._mirror_frame_pending = False
-
-        if self._screen_mirror_engine is not None:
-            self._screen_mirror_engine.close()
-            self._screen_mirror_engine = None
         self._btn_mirror_start.setEnabled(True)
         self._btn_mirror_stop.setEnabled(False)
         self._update_mirror_status("Idle")
@@ -608,7 +596,7 @@ class MainWindow(QMainWindow):
     def _on_mirror_edge_changed(self):
         """Обновляет label и live-применяет edge depth в engine."""
         self._mirror_edge_label.setText(f"{self._mirror_edge_slider.value()}%")
-        if self._screen_mirroring_active and self._screen_mirror_engine:
+        if self._screen_mirroring_active:
             try:
                 self._queue_mirror_restart()
             except Exception:
@@ -617,17 +605,15 @@ class MainWindow(QMainWindow):
     def _on_mirror_smooth_changed(self):
         """Обновляет label и live-применяет smoothing в engine."""
         self._mirror_smooth_label.setText(f"{self._mirror_smooth_slider.value()}%")
-        if self._screen_mirroring_active and self._screen_mirror_engine:
-            self._screen_mirror_engine.set_smoothing_factor(
-                self._mirror_smoothing_factor()
-            )
+        if self._screen_mirroring_active:
+            self._queue_mirror_restart()
 
     def _on_mirror_sat_changed(self):
         """Обновляет label и live-применяет saturation boost в engine."""
         val = self._mirror_sat_slider.value() / 100.0
         self._mirror_sat_label.setText(f"{val:.1f}x")
-        if self._screen_mirroring_active and self._screen_mirror_engine:
-            self._screen_mirror_engine.set_saturation_boost(val)
+        if self._screen_mirroring_active:
+            self._queue_mirror_restart()
 
     def _on_mirror_fps_changed(self):
         """Обновляет label и перестраивает интервал таймера."""
