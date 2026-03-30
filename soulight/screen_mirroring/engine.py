@@ -18,7 +18,6 @@ from soulight.screen_mirroring.layout import ScreenMirrorLayout, build_layout
 from soulight.screen_mirroring.sampler import (
     FrameSmoother,
     SampledColors,
-    flatten_rgb,
     sample_frame,
 )
 from soulight.screen_mirroring.screen_capture import ScreenCapturer
@@ -30,7 +29,10 @@ from soulight.screen_mirroring.screen_capture import ScreenCapturer
 class MirroringFrameResult:
     layout: ScreenMirrorLayout
     sampled: SampledColors
-    rgb_bytes: bytes
+    # Этот буфер пока оставлен для совместимости структуры результата.
+    # В текущем worker/UI пути он не используется, поэтому в hot path
+    # мы больше не тратим CPU на его сборку каждый кадр.
+    rgb_bytes: Optional[bytes]
 
 
 # Этот класс — главный алгоритмический фасад для screen mirroring.
@@ -94,11 +96,10 @@ class ScreenMirrorEngine:
             smoother=self._smoother,
             saturation_boost=self._saturation_boost,
         )
-        rgb_bytes = flatten_rgb(sampled.physical_colors)
         return MirroringFrameResult(
             layout=self._layout,
             sampled=sampled,
-            rgb_bytes=rgb_bytes,
+            rgb_bytes=None,
         )
 
     # Этот метод позволяет на лету обновить силу сглаживания.
