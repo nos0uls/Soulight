@@ -1,12 +1,13 @@
 {
   "counts": {
-    "top": 14,
+    "top": 15,
     "bottom": 5,
     "left": 17,
-    "right": 12
+    "right": 13
   },
   "enabled": {
     "top": [
+      true,
       true,
       true,
       true,
@@ -60,10 +61,11 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
   "start_corner": 1,
   "clockwise": true,
-  "start_offset": 26
+  "start_offset": 25
 }

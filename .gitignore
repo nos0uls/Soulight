@@ -20,3 +20,5 @@ Thumbs.db
 # Environment
 .env
 venv/
+soulight/color_preset.json
+led_config.json
