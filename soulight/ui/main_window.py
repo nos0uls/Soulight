@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QFrame, QSizePolicy, QMessageBox, QTabWidget,
     QComboBox,
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, QMetaObject, Q_ARG, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QThread, QMetaObject
 from PyQt6.QtGui import QColor, QPainter, QLinearGradient, QMouseEvent, QFont
 
 from soulight.led_config import SIDE_COLORS, MAX_LEDS

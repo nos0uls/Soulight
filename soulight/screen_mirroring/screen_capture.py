@@ -55,7 +55,14 @@ class ScreenCapturer:
     def _ensure_sct(self):
         if self._sct is None:
             import mss
-            self._sct = mss.mss()
+            # В некоторых Windows-сборках mss(with_cursor=False) падает внутри
+            # backend с ошибкой вида "thread_locker object has no attribute srcdc".
+            # Поэтому сначала пробуем явное отключение курсора,
+            # а при несовместимости откатываемся к обычному mss().
+            try:
+                self._sct = mss.mss(with_cursor=False)
+            except Exception:
+                self._sct = mss.mss()
 
     # Этот метод возвращает реальную геометрию выбранного монитора.
     def get_monitor_geometry(self) -> MonitorGeometry:
