@@ -10,6 +10,7 @@
 # - Worker отправляет сигнал frame_ready → UI получает готовые цвета
 # - Таймер живёт в UI thread и управляет частотой запросов
 
+import threading
 from typing import List, Tuple
 
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
@@ -36,6 +37,7 @@ class MirrorWorker(QObject):
         edge_fraction,
         smoothing_factor,
         saturation_boost,
+        brightness_gain,
         parent=None,
     ):
         super().__init__(parent)
@@ -44,12 +46,26 @@ class MirrorWorker(QObject):
         self._edge_fraction = float(edge_fraction)
         self._smoothing_factor = float(smoothing_factor)
         self._saturation_boost = float(saturation_boost)
+        # Этот gain усиливает уже sampled RGB и нужен именно для mirroring output.
+        self._brightness_gain = float(brightness_gain)
         self._engine: ScreenMirrorEngine = None
+        # Этот счётчик помогает залогировать только первые удачные кадры.
+        # Так мы видим, что worker реально продолжает жить после старта.
+        self._processed_frames = 0
+
+    # Компактный worker log для дебага thread/lifecycle проблем.
+    # Сообщения короткие, чтобы не зашумлять консоль во время normal run.
+    def _debug_log(self, stage: str, message: str) -> None:
+        print(
+            f"[MirrorWorker:{stage}] "
+            f"thread={threading.get_ident()} {message}"
+        )
 
     @pyqtSlot()
     def shutdown(self):
         """Закрывает engine и его ресурсы в контексте worker thread."""
         if self._engine is not None:
+            self._debug_log("shutdown", f"frames={self._processed_frames}")
             self._engine.close()
             self._engine = None
 
@@ -64,17 +80,57 @@ class MirrorWorker(QObject):
                 # Engine создаётся лениво ПРЯМО в worker thread.
                 # Это важно для Windows backend mss: capture object должен жить
                 # в том же потоке, где потом используется.
-                self._engine = ScreenMirrorEngine(
-                    config=self._config,
-                    monitor_index=self._monitor_index,
-                    edge_fraction=self._edge_fraction,
-                    smoothing_factor=self._smoothing_factor,
-                    saturation_boost=self._saturation_boost,
+                self._debug_log(
+                    "engine-create",
+                    (
+                        f"monitor={self._monitor_index} edge={self._edge_fraction:.3f} "
+                        f"smooth={self._smoothing_factor:.3f} sat={self._saturation_boost:.3f} "
+                        f"bright={self._brightness_gain:.3f}"
+                    ),
                 )
-                self._engine.rebuild_layout()
+                try:
+                    self._engine = ScreenMirrorEngine(
+                        config=self._config,
+                        monitor_index=self._monitor_index,
+                        edge_fraction=self._edge_fraction,
+                        smoothing_factor=self._smoothing_factor,
+                        saturation_boost=self._saturation_boost,
+                        brightness_gain=self._brightness_gain,
+                    )
+                    self._engine.rebuild_layout()
+                except Exception as engine_error:
+                    self._debug_log(
+                        "engine-create-failed",
+                        f"{type(engine_error).__name__}: {engine_error}",
+                    )
+                    raise
 
-            result = self._engine.process_next_frame()
+            try:
+                result = self._engine.process_next_frame()
+            except Exception as first_error:
+                # Первый кадр на Windows иногда падает из-за гонки старта backend/thread.
+                # Делаем один тихий retry с небольшой задержкой, чтобы не ронять mirroring.
+                if self._processed_frames == 0:
+                    self._debug_log(
+                        "first-frame-retry",
+                        f"{type(first_error).__name__}: {first_error}",
+                    )
+                    import time
+                    time.sleep(0.1)  # 100ms перед retry
+                    result = self._engine.process_next_frame()
+                else:
+                    raise
+            self._processed_frames += 1
+            if self._processed_frames <= 3:
+                self._debug_log(
+                    "frame-ready",
+                    (
+                        f"count={self._processed_frames} "
+                        f"physical_leds={len(result.sampled.physical_colors)}"
+                    ),
+                )
             # Отправляем physical_colors в UI thread
             self.frame_ready.emit(result.sampled.physical_colors)
         except Exception as e:
+            self._debug_log("error", f"{type(e).__name__}: {e}")
             self.error_occurred.emit(str(e))

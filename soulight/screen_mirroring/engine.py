@@ -45,12 +45,17 @@ class ScreenMirrorEngine:
         edge_fraction: float = 0.08,
         smoothing_factor: float = 0.35,
         saturation_boost: float = 1.3,
+        brightness_gain: float = 1.0,
     ):
         self._config = config
         self._capturer = ScreenCapturer(monitor_index=monitor_index)
         self._edge_fraction = float(edge_fraction)
         self._smoother = FrameSmoother(factor=smoothing_factor)
         self._saturation_boost = float(saturation_boost)
+        # Этот gain усиливает уже sampled RGB перед отправкой на ленту.
+        # Он нужен отдельно от hardware dimmer, потому что средний цвет зоны
+        # почти всегда темнее, чем solid color на той же ленте.
+        self._brightness_gain = max(0.0, float(brightness_gain))
         self._layout: Optional[ScreenMirrorLayout] = None
 
     # Закрывает ресурсы (mss instance внутри capturer).
@@ -89,12 +94,15 @@ class ScreenMirrorEngine:
         if self._layout is None:
             self.rebuild_layout()
 
-        frame = self._capturer.capture()
+        # Захватываем только полосы по краям, потому что layout sample_rect
+        # никогда не требует пиксели из центра экрана.
+        frame = self._capturer.capture_edges(edge_depth=self._layout.edge_depth)
         sampled = sample_frame(
             frame=frame,
             layout=self._layout,
             smoother=self._smoother,
             saturation_boost=self._saturation_boost,
+            brightness_gain=self._brightness_gain,
         )
         return MirroringFrameResult(
             layout=self._layout,
@@ -116,3 +124,7 @@ class ScreenMirrorEngine:
     # Насыщенность: 1.0 = без изменений, >1.0 = ярче, <1.0 = бледнее.
     def set_saturation_boost(self, value: float) -> None:
         self._saturation_boost = float(value)
+
+    # Brightness gain: 1.0 = без изменений, 2.0 = примерно вдвое ярче до clamp.
+    def set_brightness_gain(self, value: float) -> None:
+        self._brightness_gain = max(0.0, float(value))

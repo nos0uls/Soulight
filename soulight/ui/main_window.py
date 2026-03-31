@@ -37,6 +37,38 @@ COLOR_PRESETS = [
 # endregion
 
 
+# region Presets для Screen Mirroring
+
+# Эти пресеты меняют только безопасные UI/processing параметры.
+# Transport cadence драйвера они не ускоряют, поэтому effective FPS
+# всё равно вычисляется отдельно и честно показывается в интерфейсе.
+MIRROR_PRESETS = {
+    "performance": {
+        "label": "Performance",
+        "edge": 6,
+        "smooth": 10,
+        "sat": 100,
+        "fps": "practical",
+    },
+    "balanced": {
+        "label": "Balanced",
+        "edge": 8,
+        "smooth": 35,
+        "sat": 130,
+        "fps": 15,
+    },
+    "quality": {
+        "label": "Quality",
+        "edge": 12,
+        "smooth": 55,
+        "sat": 150,
+        "fps": 20,
+    },
+}
+
+# endregion
+
+
 # region ColorPreview — виджет предпросмотра текущего цвета
 class ColorPreview(QFrame):
     """
@@ -118,6 +150,9 @@ class MainWindow(QMainWindow):
         self._mirror_thread = None   # QThread
         self._mirror_worker = None   # MirrorWorker
         self._mirror_frame_pending = False  # Защита от накопления запросов
+        # Этот флаг нужен, чтобы bulk-обновление слайдеров из пресета
+        # не переводило preset selector в Custom посреди применения.
+        self._applying_mirror_preset = False
         # Текущие RGB значения
         self._r = 255
         self._g = 0
@@ -307,6 +342,20 @@ class MainWindow(QMainWindow):
         layout.addWidget(source_group)
         # endregion
 
+        # region Preset selector — быстрый выбор quality/perf баланса
+        preset_group = QGroupBox("Preset")
+        preset_layout = QHBoxLayout(preset_group)
+        preset_layout.addWidget(QLabel("Profile:"))
+        self._mirror_preset_combo = QComboBox()
+        self._mirror_preset_combo.addItem("Custom", "custom")
+        for preset_key, preset in MIRROR_PRESETS.items():
+            self._mirror_preset_combo.addItem(preset["label"], preset_key)
+        self._mirror_preset_combo.setCurrentIndex(2)
+        self._mirror_preset_combo.currentIndexChanged.connect(self._on_mirror_preset_changed)
+        preset_layout.addWidget(self._mirror_preset_combo, stretch=1)
+        layout.addWidget(preset_group)
+        # endregion
+
         # region Tuning — edge depth, smoothing, fps
         tuning_group = QGroupBox("Tuning")
         tuning_layout = QVBoxLayout(tuning_group)
@@ -353,6 +402,22 @@ class MainWindow(QMainWindow):
         sat_row.addWidget(self._mirror_sat_label)
         tuning_layout.addLayout(sat_row)
 
+        # Brightness — яркость LED при mirroring (0-255)
+        self._mirror_brightness_slider, self._mirror_brightness_label = self._make_slider(
+            "Brightness", 100, self._on_mirror_brightness_changed
+        )
+        # Здесь это именно software gain для mirroring-картинки, а не master dimmer.
+        # 100% = без изменений, 200% = примерно вдвое ярче до clamp.
+        self._mirror_brightness_slider.setRange(25, 300)
+        self._mirror_brightness_label.setText("100%")
+        brightness_row = QHBoxLayout()
+        brightness_row.addWidget(QLabel("Brightness"))
+        brightness_row.addWidget(self._mirror_brightness_slider)
+        self._mirror_brightness_label.setFixedWidth(48)
+        self._mirror_brightness_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        brightness_row.addWidget(self._mirror_brightness_label)
+        tuning_layout.addLayout(brightness_row)
+
         # FPS — частота кадров mirroring
         self._mirror_fps_slider, self._mirror_fps_label = self._make_slider(
             "FPS", 15, self._on_mirror_fps_changed
@@ -366,6 +431,12 @@ class MainWindow(QMainWindow):
         self._mirror_fps_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         fps_row.addWidget(self._mirror_fps_label)
         tuning_layout.addLayout(fps_row)
+
+        # Этот label показывает честный effective FPS после safe cap.
+        # Так пользователь видит, когда requested FPS выше practical throughput.
+        self._mirror_fps_hint_label = QLabel("")
+        self._mirror_fps_hint_label.setStyleSheet("color: #9399b2;")
+        tuning_layout.addWidget(self._mirror_fps_hint_label)
 
         layout.addWidget(tuning_group)
         # endregion
@@ -394,6 +465,7 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         # Заполняем список мониторов при создании вкладки
         self._populate_monitor_combo()
+        self._refresh_mirror_tuning_labels()
 
     # region Screen Mirror helpers
 
@@ -439,9 +511,106 @@ class MainWindow(QMainWindow):
         return self._mirror_sat_slider.value() / 100.0
 
     def _mirror_interval_ms(self):
-        """Интервал таймера mirroring по текущему FPS."""
-        fps = max(1, int(self._mirror_fps_slider.value()))
+        """Интервал таймера mirroring по effective FPS после safe cap."""
+        fps = self._mirror_effective_fps()
         return max(1, int(1000 / fps))
+
+    def _mirror_requested_fps(self):
+        """Requested FPS из UI до применения safe cap."""
+        return max(1, int(self._mirror_fps_slider.value()))
+
+    def _mirror_practical_max_fps(self):
+        """Practical throughput текущего transport path без ускорения драйвера."""
+        return max(1, int(self._driver.practical_mirroring_max_fps))
+
+    def _mirror_effective_fps(self):
+        """Effective FPS, который реально имеет смысл просить у worker."""
+        return min(self._mirror_requested_fps(), self._mirror_practical_max_fps())
+
+    def _mirror_brightness_gain(self):
+        """Software brightness gain для mirroring-картинки."""
+        return max(0.0, float(self._mirror_brightness_slider.value()) / 100.0)
+
+    def _mirror_preset_target_fps(self, preset):
+        """Переводит preset policy в конкретное requested FPS значение."""
+        target = preset["fps"]
+        if target == "practical":
+            return self._mirror_practical_max_fps()
+        return max(1, int(target))
+
+    def _set_mirror_preset_combo_value(self, preset_key):
+        """Аккуратно меняет preset selector без лишних сигналов."""
+        for index in range(self._mirror_preset_combo.count()):
+            if self._mirror_preset_combo.itemData(index) == preset_key:
+                self._mirror_preset_combo.blockSignals(True)
+                self._mirror_preset_combo.setCurrentIndex(index)
+                self._mirror_preset_combo.blockSignals(False)
+                return
+
+    def _refresh_mirror_tuning_labels(self):
+        """
+        Синхронизирует текстовые label после любого изменения tuning.
+
+        Здесь мы отдельно показываем requested и effective FPS,
+        чтобы cap не выглядел как скрытая магия.
+        """
+        self._mirror_edge_label.setText(f"{self._mirror_edge_slider.value()}%")
+        self._mirror_smooth_label.setText(f"{self._mirror_smooth_slider.value()}%")
+        sat_value = self._mirror_sat_slider.value() / 100.0
+        self._mirror_sat_label.setText(f"{sat_value:.1f}x")
+        self._mirror_brightness_label.setText(f"{self._mirror_brightness_slider.value()}%")
+
+        requested = self._mirror_requested_fps()
+        effective = self._mirror_effective_fps()
+        practical = self._mirror_practical_max_fps()
+        self._mirror_fps_label.setText(str(requested))
+        if requested > effective:
+            self._mirror_fps_hint_label.setText(
+                f"Effective: {effective} FPS (safe cap, transport ~{practical} FPS)"
+            )
+            self._mirror_fps_hint_label.setStyleSheet("color: #f9e2af;")
+        else:
+            self._mirror_fps_hint_label.setText(
+                f"Effective: {effective} FPS (transport ~{practical} FPS)"
+            )
+            self._mirror_fps_hint_label.setStyleSheet("color: #9399b2;")
+
+    def _apply_mirror_preset(self, preset_key):
+        """
+        Применяет preset как одну атомарную операцию.
+
+        Это важно, чтобы не дёргать restart несколько раз подряд,
+        пока UI только выставляет значения в слайдеры.
+        """
+        preset = MIRROR_PRESETS.get(preset_key)
+        if preset is None:
+            return
+
+        self._applying_mirror_preset = True
+        sliders = (
+            self._mirror_edge_slider,
+            self._mirror_smooth_slider,
+            self._mirror_sat_slider,
+            self._mirror_fps_slider,
+        )
+        for slider in sliders:
+            slider.blockSignals(True)
+
+        self._mirror_edge_slider.setValue(int(preset["edge"]))
+        self._mirror_smooth_slider.setValue(int(preset["smooth"]))
+        self._mirror_sat_slider.setValue(int(preset["sat"]))
+        self._mirror_fps_slider.setValue(self._mirror_preset_target_fps(preset))
+
+        for slider in sliders:
+            slider.blockSignals(False)
+        self._applying_mirror_preset = False
+
+        self._set_mirror_preset_combo_value(preset_key)
+        self._refresh_mirror_tuning_labels()
+
+        if self._screen_mirroring_active:
+            self._queue_mirror_restart()
+            self._screen_mirror_timer.start(self._mirror_interval_ms())
 
     def _update_mirror_status(self, text, color="#9399b2"):
         """Обновляет статус-label на вкладке Screen Mirror."""
@@ -458,6 +627,7 @@ class MainWindow(QMainWindow):
             "edge_fraction": self._mirror_edge_fraction(),
             "smoothing_factor": self._mirror_smoothing_factor(),
             "saturation_boost": self._mirror_saturation_boost(),
+            "brightness_gain": self._mirror_brightness_gain(),
         }
 
     def _restart_screen_mirroring(self):
@@ -531,13 +701,21 @@ class MainWindow(QMainWindow):
             focus_widget.clearFocus()
         # Убираем solid color, чтобы per-LED не конфликтовал
         self._driver.set_color(0, 0, 0)
+        # Во время mirroring master brightness берём из основного global slider.
+        # Отдельный mirror brightness теперь управляет именно gain sampled цветов.
+        self._driver.set_brightness(self._slider_bright.value())
         self._screen_mirror_timer.start(self._mirror_interval_ms())
         self._btn_mirror_start.setEnabled(False)
         self._btn_mirror_stop.setEnabled(True)
-        self._update_mirror_status("Running", "#2d8c2d")
+        self._update_mirror_status(
+            f"Running · {self._mirror_effective_fps()} FPS effective",
+            "#2d8c2d",
+        )
         self._btn_mirror_stop.setFocus()
-        # Первый кадр сразу
-        self._tick_screen_mirroring()
+        # Первый кадр просим не мгновенно, а на следующем тике event loop.
+        # Это уменьшает шанс стартовой гонки между UI thread и worker thread.
+        # Увеличили до 100ms — на медленных системах thread старт может занимать 50-80ms.
+        QTimer.singleShot(100, self._tick_screen_mirroring)
 
     def _stop_screen_mirroring(self, restore_output=True):
         """Останавливает screen mirroring: таймер, thread, engine."""
@@ -602,7 +780,9 @@ class MainWindow(QMainWindow):
 
     def _on_mirror_edge_changed(self):
         """Обновляет label и live-применяет edge depth в engine."""
-        self._mirror_edge_label.setText(f"{self._mirror_edge_slider.value()}%")
+        self._refresh_mirror_tuning_labels()
+        if not self._applying_mirror_preset:
+            self._set_mirror_preset_combo_value("custom")
         if self._screen_mirroring_active:
             try:
                 self._queue_mirror_restart()
@@ -611,22 +791,45 @@ class MainWindow(QMainWindow):
 
     def _on_mirror_smooth_changed(self):
         """Обновляет label и live-применяет smoothing в engine."""
-        self._mirror_smooth_label.setText(f"{self._mirror_smooth_slider.value()}%")
+        self._refresh_mirror_tuning_labels()
+        if not self._applying_mirror_preset:
+            self._set_mirror_preset_combo_value("custom")
         if self._screen_mirroring_active:
             self._queue_mirror_restart()
 
     def _on_mirror_sat_changed(self):
         """Обновляет label и live-применяет saturation boost в engine."""
-        val = self._mirror_sat_slider.value() / 100.0
-        self._mirror_sat_label.setText(f"{val:.1f}x")
+        self._refresh_mirror_tuning_labels()
+        if not self._applying_mirror_preset:
+            self._set_mirror_preset_combo_value("custom")
+        if self._screen_mirroring_active:
+            self._queue_mirror_restart()
+
+    def _on_mirror_brightness_changed(self):
+        """Обновляет label и live-применяет software brightness gain в mirroring."""
+        self._mirror_brightness_label.setText(f"{self._mirror_brightness_slider.value()}%")
+        if not self._applying_mirror_preset:
+            self._set_mirror_preset_combo_value("custom")
         if self._screen_mirroring_active:
             self._queue_mirror_restart()
 
     def _on_mirror_fps_changed(self):
         """Обновляет label и перестраивает интервал таймера."""
-        self._mirror_fps_label.setText(str(self._mirror_fps_slider.value()))
+        self._refresh_mirror_tuning_labels()
+        if not self._applying_mirror_preset:
+            self._set_mirror_preset_combo_value("custom")
         if self._screen_mirroring_active:
             self._screen_mirror_timer.start(self._mirror_interval_ms())
+            self._update_mirror_status(
+                f"Running · {self._mirror_effective_fps()} FPS effective",
+                "#2d8c2d",
+            )
+
+    def _on_mirror_preset_changed(self, index):
+        """Применяет выбранный preset или оставляет ручной режим Custom."""
+        preset_key = self._mirror_preset_combo.currentData()
+        if preset_key in MIRROR_PRESETS:
+            self._apply_mirror_preset(preset_key)
 
     # endregion
 

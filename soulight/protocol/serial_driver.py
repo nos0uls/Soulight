@@ -15,6 +15,12 @@ from soulight.protocol.bridge import BeelightBridge
 DEFAULT_PORT = "COM7"
 DEFAULT_BAUD = 500000
 
+# Эти константы описывают только безопасную оценку practical throughput.
+# Мы не ускоряем transport path, а лишь честно сообщаем UI,
+# сколько кадров в секунду сейчас имеет смысл запрашивать.
+PER_LED_FRAME_SLEEP_OVERHEAD = 0.005
+MIRROR_FPS_SAFETY_MARGIN = 0.98
+
 
 class LEDDriver:
     """
@@ -67,6 +73,21 @@ class LEDDriver:
     def bridge(self):
         """Доступ к BeelightBridge (для прямого вызова методов при необходимости)."""
         return self._bridge
+
+    @property
+    def practical_mirroring_max_fps(self):
+        """
+        Безопасная оценка practical FPS для screen mirroring.
+
+        Здесь учитываем только текущую send cadence драйвера,
+        чтобы UI не просил worker делать заметно больше кадров,
+        чем transport path обычно успевает отправить на контроллер.
+        """
+        frame_time = self._send_interval + PER_LED_FRAME_SLEEP_OVERHEAD
+        if frame_time <= 0:
+            return 1
+        estimated = int((1.0 / frame_time) * MIRROR_FPS_SAFETY_MARGIN)
+        return max(1, estimated)
 
     def connect(self):
         """

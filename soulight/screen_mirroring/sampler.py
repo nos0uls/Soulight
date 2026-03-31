@@ -16,7 +16,7 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 
 from soulight.screen_mirroring.layout import ScreenMirrorLayout, LayoutLed, SampleRect
-from soulight.screen_mirroring.screen_capture import CaptureFrame
+from soulight.screen_mirroring.screen_capture import CaptureFrame, CaptureRegion
 
 
 # Этот dataclass хранит уже готовый результат sampling.
@@ -78,7 +78,10 @@ def sample_frame(
     layout: ScreenMirrorLayout,
     smoother: Optional[FrameSmoother] = None,
     saturation_boost: float = 1.0,
+    brightness_gain: float = 1.0,
 ) -> SampledColors:
+    # width/height layout проверяем всегда, даже если пиксели приходят как edge strips.
+    # Так sampler остаётся привязан к реальному размеру исходного монитора.
     if frame.width != layout.capture_width or frame.height != layout.capture_height:
         raise ValueError("frame size does not match layout capture size")
 
@@ -87,11 +90,16 @@ def sample_frame(
         if not led.enabled:
             logical_colors.append((0, 0, 0))
             continue
-        color = _average_rect_bgra(frame, led.sample_rect)
+        color = _average_rect_bgra(frame, led)
         # Saturation boost делает цвета насыщеннее (как у Beelight).
         # При boost=1.0 цвет не меняется.
         if saturation_boost != 1.0:
             color = _boost_saturation(*color, saturation_boost)
+        # Brightness gain усиливает сам sampled цвет.
+        # Это важно для mirroring: средний цвет зоны почти всегда темнее,
+        # чем статический solid white режим контроллера.
+        if brightness_gain != 1.0:
+            color = _boost_brightness(*color, brightness_gain)
         logical_colors.append(color)
 
     if smoother is not None:
@@ -121,19 +129,82 @@ def flatten_rgb(colors: Iterable[Tuple[int, int, int]]) -> bytes:
 
 # Эта функция считает средний RGB цвет прямоугольника внутри BGRA numpy-кадра.
 # Используем numpy slicing — на порядки быстрее поэлементного Python-цикла.
-def _average_rect_bgra(frame: CaptureFrame, rect: SampleRect) -> Tuple[int, int, int]:
-    x0 = max(0, min(frame.width, rect.x))
-    y0 = max(0, min(frame.height, rect.y))
-    x1 = max(x0 + 1, min(frame.width, rect.x + rect.width))
-    y1 = max(y0 + 1, min(frame.height, rect.y + rect.height))
+def _average_rect_bgra(frame: CaptureFrame, led: LayoutLed) -> Tuple[int, int, int]:
+    rect = led.sample_rect
+    # Если у нас есть полный кадр — используем старый и самый простой путь.
+    # Это удобно и для совместимости, и для синтетических тестов.
+    if frame.bgra is not None:
+        return _average_rect_from_region(
+            region=CaptureRegion(
+                left=0,
+                top=0,
+                width=frame.width,
+                height=frame.height,
+                bgra=frame.bgra,
+            ),
+            frame_width=frame.width,
+            frame_height=frame.height,
+            rect=rect,
+        )
 
-    # frame.bgra — numpy array shape (H, W, 4) dtype=uint8, порядок каналов BGRA
-    region = frame.bgra[y0:y1, x0:x1]
-    if region.size == 0:
+    # Если full frame нет, значит capture path принёс только edge strips.
+    # Тогда выбираем нужный strip по положению rect и считаем средний цвет уже в нём.
+    if frame.edge_regions:
+        region = _select_edge_region(frame=frame, led=led)
+        if region is not None:
+            return _average_rect_from_region(
+                region=region,
+                frame_width=frame.width,
+                frame_height=frame.height,
+                rect=rect,
+            )
+
+    raise ValueError("capture frame does not contain accessible BGRA data for sample rect")
+
+
+# Этот helper выбирает один edge strip, в котором целиком лежит sample rect.
+# Layout уже знает точную сторону каждого LED, поэтому side —
+# самый надёжный источник правды для выбора strip buffer.
+def _select_edge_region(frame: CaptureFrame, led: LayoutLed) -> Optional[CaptureRegion]:
+    edge_regions = frame.edge_regions or {}
+    if led.side == "top":
+        return edge_regions.get("top")
+    if led.side == "left":
+        return edge_regions.get("left")
+    if led.side == "bottom":
+        return edge_regions.get("bottom")
+    if led.side == "right":
+        return edge_regions.get("right")
+    return None
+
+
+# Этот helper переводит global screen rect в локальные координаты region buffer.
+# После этого mean считается так же, как и раньше, через numpy slicing.
+def _average_rect_from_region(
+    region: CaptureRegion,
+    frame_width: int,
+    frame_height: int,
+    rect: SampleRect,
+) -> Tuple[int, int, int]:
+    # Сначала ограничиваем rect границами всего исходного кадра.
+    # Это сохраняет прежнюю защиту от выходов за экран.
+    x0 = max(0, min(frame_width, rect.x))
+    y0 = max(0, min(frame_height, rect.y))
+    x1 = max(x0 + 1, min(frame_width, rect.x + rect.width))
+    y1 = max(y0 + 1, min(frame_height, rect.y + rect.height))
+
+    local_x0 = max(0, min(region.width, x0 - region.left))
+    local_y0 = max(0, min(region.height, y0 - region.top))
+    local_x1 = max(local_x0 + 1, min(region.width, x1 - region.left))
+    local_y1 = max(local_y0 + 1, min(region.height, y1 - region.top))
+
+    # region.bgra — numpy array shape (H, W, 4) dtype=uint8, порядок каналов BGRA
+    sample = region.bgra[local_y0:local_y1, local_x0:local_x1]
+    if sample.size == 0:
         return (0, 0, 0)
 
     # mean по осям 0,1 даёт средний цвет всей зоны (4 канала)
-    avg = region.mean(axis=(0, 1))
+    avg = sample.mean(axis=(0, 1))
     # BGRA → RGB
     return (int(avg[2]), int(avg[1]), int(avg[0]))
 
@@ -156,5 +227,19 @@ def _boost_saturation(r: int, g: int, b: int, boost: float) -> Tuple[int, int, i
     s = min(1.0, s * boost)
     nr, ng, nb = colorsys.hsv_to_rgb(h, s, v)
     return (_clamp(int(nr * 255)), _clamp(int(ng * 255)), _clamp(int(nb * 255)))
+
+
+# Усиливает яркость sampled RGB кортежа простым gain multiplier.
+# Это не меняет hue напрямую, а лишь поднимает канал R/G/B с clamp до 255.
+# В mirroring это полезно, потому что среднее по зоне часто визуально тусклее,
+# чем ожидаемая "максимальная" яркость ленты.
+def _boost_brightness(r: int, g: int, b: int, gain: float) -> Tuple[int, int, int]:
+    if gain == 1.0:
+        return (r, g, b)
+    return (
+        _clamp(int(r * gain)),
+        _clamp(int(g * gain)),
+        _clamp(int(b * gain)),
+    )
 
 # endregion
