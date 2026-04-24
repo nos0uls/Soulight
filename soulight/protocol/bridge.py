@@ -293,7 +293,7 @@ class BeelightBridge:
                 return bytes(result) if result is not None else None
 
             n = len(colors_rgb)
-            arr = Array.CreateInstance(self._rgbType if hasattr(self, '_rgbType') else self._rgb_type, n)
+            arr = Array.CreateInstance(self._rgb_type, n)
 
             flags = BindingFlags.Public | BindingFlags.Instance
             field_r = self._rgb_type.GetField("R", flags)

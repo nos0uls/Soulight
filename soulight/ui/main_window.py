@@ -466,13 +466,15 @@ class MainWindow(QMainWindow):
         layout.addLayout(onoff_layout)
 
         # === Speed Mode — быстрый выбор частоты обновления ===
+        # Управляет интервалом отправки пакетов в serial driver.
+        # Влияет на все режимы: solid color, mirroring, scenes, audio.
         speed_group = QGroupBox("Speed Mode")
         speed_layout = QHBoxLayout(speed_group)
         self._speed_buttons = {}
         for label, interval, tooltip in [
-            ("Smooth", 0.120, "Slow and smooth (~8 FPS)"),
-            ("Normal", 0.070, "Balanced (~14 FPS)"),
-            ("Fast", 0.040, "Fast and reactive (~25 FPS)"),
+            ("Smooth", 0.070, "Плавно, экономно (~14 FPS)"),
+            ("Normal", 0.040, "Баланс (~25 FPS)"),
+            ("Fast",   0.015, "Максимум (~60 FPS)"),
         ]:
             btn = QPushButton(label)
             btn.setCheckable(True)
@@ -481,9 +483,9 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda checked, iv=interval, lb=label: self._on_speed_mode_clicked(iv, lb))
             speed_layout.addWidget(btn)
             self._speed_buttons[label] = btn
-        # Normal по умолчанию
-        self._speed_buttons["Normal"].setChecked(True)
-        self._driver._send_interval = 0.070
+        # Fast по умолчанию — не перезаписываем _send_interval,
+        # он уже инициализирован в serial_driver как 0.015
+        self._speed_buttons["Fast"].setChecked(True)
         layout.addWidget(speed_group)
 
         layout.addStretch()
@@ -1328,7 +1330,9 @@ class MainWindow(QMainWindow):
     def _start_scenes(self, pattern_name: str):
         self._stop_scenes()
         self._scene_thread = QThread()
-        self._scene_engine = SceneEngine(led_count=75, fps=20)
+        # led_count берём из актуального LED конфига, а не хардкодим
+        actual_led_count = self._led_config_panel.config.total
+        self._scene_engine = SceneEngine(led_count=actual_led_count, fps=20)
         self._scene_engine.moveToThread(self._scene_thread)
         self._scene_engine.frame_ready.connect(self._on_scene_frame_ready)
         self._scene_engine.error_occurred.connect(self._on_scene_error)
@@ -1429,7 +1433,9 @@ class MainWindow(QMainWindow):
     def _start_audio(self, mode_name: str):
         self._stop_audio()
         self._audio_thread = QThread()
-        self._audio_engine = AudioEngine(led_count=75, fps=20)
+        # led_count берём из актуального LED конфига, а не хардкодим
+        actual_led_count = self._led_config_panel.config.total
+        self._audio_engine = AudioEngine(led_count=actual_led_count, fps=20)
         self._audio_engine.moveToThread(self._audio_thread)
         self._audio_engine.frame_ready.connect(self._on_audio_frame_ready)
         self._audio_engine.error_occurred.connect(self._on_audio_error)
