@@ -1283,17 +1283,29 @@ class MainWindow(QMainWindow):
         pattern_layout.addWidget(self._scene_pattern_combo)
         layout.addWidget(pattern_group)
 
-        speed_group = QGroupBox("Speed")
-        speed_layout = QHBoxLayout(speed_group)
+        speed_group = QGroupBox("Options")
+        speed_layout = QVBoxLayout(speed_group)
+        
+        # Speed row
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel("Speed:"))
         self._scene_speed_slider = QSlider(Qt.Orientation.Horizontal)
         self._scene_speed_slider.setRange(25, 400)
         self._scene_speed_slider.setValue(100)
         self._scene_speed_slider.setToolTip("Animation speed (25% - 400%)")
         self._scene_speed_label = QLabel("100%")
         self._scene_speed_slider.valueChanged.connect(self._on_scene_speed_changed)
-        speed_layout.addWidget(self._scene_speed_slider)
+        speed_row.addWidget(self._scene_speed_slider)
         self._scene_speed_label.setFixedWidth(40)
-        speed_layout.addWidget(self._scene_speed_label)
+        speed_row.addWidget(self._scene_speed_label)
+        speed_layout.addLayout(speed_row)
+
+        # Full LED Checkbox
+        self._scene_full_led_cb = QCheckBox("Full LED (Использовать все светодиоды)")
+        self._scene_full_led_cb.setChecked(True)
+        self._scene_full_led_cb.setToolTip("Если выключено, анимация будет игнорировать углы без ленты (как в Screen Mirroring).")
+        speed_layout.addWidget(self._scene_full_led_cb)
+        
         layout.addWidget(speed_group)
 
         btn_row = QHBoxLayout()
@@ -1333,6 +1345,12 @@ class MainWindow(QMainWindow):
         # led_count берём из актуального LED конфига, а не хардкодим
         actual_led_count = self._led_config_panel.config.total
         self._scene_engine = SceneEngine(led_count=actual_led_count, fps=20)
+        
+        if not self._scene_full_led_cb.isChecked():
+            from soulight.screen_mirroring.layout import build_layout
+            layout_data = build_layout(self._led_config_panel.config, 100, 100, 0.08)
+            self._scene_engine.set_layout(layout_data.leds)
+            
         self._scene_engine.moveToThread(self._scene_thread)
         self._scene_engine.frame_ready.connect(self._on_scene_frame_ready)
         self._scene_engine.error_occurred.connect(self._on_scene_error)
@@ -1379,24 +1397,51 @@ class MainWindow(QMainWindow):
         self._audio_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
         layout.addWidget(self._audio_status_label)
 
-        mode_group = QGroupBox("Mode")
+        mode_group = QGroupBox("Audio Settings")
         mode_layout = QVBoxLayout(mode_group)
+        
+        # Audio Source
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel("Source:"))
+        self._audio_source_combo = QComboBox()
+        self._audio_source_combo.addItem("Microphone", False)
+        self._audio_source_combo.addItem("System Audio (Loopback)", True)
+        source_row.addWidget(self._audio_source_combo)
+        mode_layout.addLayout(source_row)
+        
+        # Mode
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Mode:"))
         self._audio_mode_combo = QComboBox()
         for key, label in MODE_LABELS.items():
             self._audio_mode_combo.addItem(label, key)
-        mode_layout.addWidget(self._audio_mode_combo)
+        mode_row.addWidget(self._audio_mode_combo)
+        mode_layout.addLayout(mode_row)
+        
         layout.addWidget(mode_group)
 
-        sens_group = QGroupBox("Sensitivity")
-        sens_layout = QHBoxLayout(sens_group)
+        sens_group = QGroupBox("Options")
+        sens_layout = QVBoxLayout(sens_group)
+        
+        # Sensitivity
+        sens_row = QHBoxLayout()
+        sens_row.addWidget(QLabel("Sensitivity:"))
         self._audio_sens_slider = QSlider(Qt.Orientation.Horizontal)
         self._audio_sens_slider.setRange(10, 500)
         self._audio_sens_slider.setValue(150)
         self._audio_sens_label = QLabel("150%")
         self._audio_sens_slider.valueChanged.connect(self._on_audio_sens_changed)
-        sens_layout.addWidget(self._audio_sens_slider)
+        sens_row.addWidget(self._audio_sens_slider)
         self._audio_sens_label.setFixedWidth(40)
-        sens_layout.addWidget(self._audio_sens_label)
+        sens_row.addWidget(self._audio_sens_label)
+        sens_layout.addLayout(sens_row)
+
+        # Full LED Checkbox
+        self._audio_full_led_cb = QCheckBox("Full LED (Использовать все светодиоды)")
+        self._audio_full_led_cb.setChecked(True)
+        self._audio_full_led_cb.setToolTip("Если выключено, анимация будет игнорировать углы без ленты (как в Screen Mirroring).")
+        sens_layout.addWidget(self._audio_full_led_cb)
+
         layout.addWidget(sens_group)
 
         btn_row = QHBoxLayout()
@@ -1428,19 +1473,25 @@ class MainWindow(QMainWindow):
         if not self._driver.connected:
             QMessageBox.warning(self, "Not connected", "Connect to the controller first.")
             return
-        self._start_audio(self._audio_mode_combo.currentData())
+        self._start_audio(self._audio_mode_combo.currentData(), self._audio_source_combo.currentData())
 
-    def _start_audio(self, mode_name: str):
+    def _start_audio(self, mode_name: str, use_loopback: bool):
         self._stop_audio()
         self._audio_thread = QThread()
         # led_count берём из актуального LED конфига, а не хардкодим
         actual_led_count = self._led_config_panel.config.total
         self._audio_engine = AudioEngine(led_count=actual_led_count, fps=20)
+        
+        if not self._audio_full_led_cb.isChecked():
+            from soulight.screen_mirroring.layout import build_layout
+            layout_data = build_layout(self._led_config_panel.config, 100, 100, 0.08)
+            self._audio_engine.set_layout(layout_data.leds)
+
         self._audio_engine.moveToThread(self._audio_thread)
         self._audio_engine.frame_ready.connect(self._on_audio_frame_ready)
         self._audio_engine.error_occurred.connect(self._on_audio_error)
         self._audio_engine.status_changed.connect(self._on_audio_status_changed)
-        self._audio_thread.started.connect(lambda: self._audio_engine.start(mode_name))
+        self._audio_thread.started.connect(lambda: self._audio_engine.start(mode_name, use_loopback=use_loopback))
         self._audio_thread.start()
         self._audio_active = True
         self._audio_engine.set_sensitivity(self._audio_sens_slider.value() / 100.0)

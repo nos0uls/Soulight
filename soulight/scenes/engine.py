@@ -59,6 +59,10 @@ class SceneEngine(QObject):
             self._pattern_params = dict(params)
         self._frame_index = 0
 
+    def set_layout(self, layout_leds: Optional[list]):
+        """Устанавливает маску layout_leds (LayoutLed) для гашения выключенных LED."""
+        self._layout_leds = layout_leds
+
     def set_speed(self, speed: float):
         """Меняет параметр speed паттерна (0.25..4.0)."""
         self._pattern_params["speed"] = max(0.25, min(4.0, float(speed)))
@@ -101,6 +105,12 @@ class SceneEngine(QObject):
                         self._led_count,
                         self._pattern_params,
                     )
+                    
+                    if hasattr(self, '_layout_leds') and self._layout_leds:
+                        for led in self._layout_leds:
+                            if not led.enabled and led.logical_index < len(colors):
+                                colors[led.logical_index] = (0, 0, 0)
+                                
                     self.frame_ready.emit(colors)
                     self._frame_index += 1
                 except Exception as e:
