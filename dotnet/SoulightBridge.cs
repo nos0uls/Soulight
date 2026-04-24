@@ -47,8 +47,12 @@ namespace SoulightBridge
                 {
                     if (m.Name == "GenRGBTransferPackage" && m.GetParameters().Length == 2)
                     {
-                        _genRgbTransfer = m;
-                        break;
+                        Type pType = m.GetParameters()[0].ParameterType;
+                        if (pType == _rgbType.MakeArrayType()) 
+                        {
+                            _genRgbTransfer = m;
+                            break;
+                        }
                     }
                 }
 

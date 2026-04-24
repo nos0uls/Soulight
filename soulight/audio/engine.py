@@ -87,55 +87,54 @@ class AudioEngine(QObject):
         self.set_mode(mode_name, params)
         self._running = True
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
-        self._thread.start()
-        self.status_changed.emit("Running")
+        
+        try:
+            self._stream = sd.InputStream(
+                samplerate=self._sample_rate,
+                channels=1,
+                blocksize=self._block_size,
+                dtype=np.float32,
+                callback=self._audio_callback
+            )
+            self._stream.start()
+            self.status_changed.emit("Running")
+        except Exception as e:
+            self.error_occurred.emit(f"Audio start error: {e}")
+            self._running = False
+            return
 
     def stop(self):
         self._running = False
         self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-            self._thread = None
+        if hasattr(self, '_stream') and self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
         self.status_changed.emit("Stopped")
 
-    def _capture_chunk(self) -> np.ndarray:
-        """Захватывает один аудио-блок (mono)."""
-        chunk = sd.rec(
-            frames=self._block_size,
-            samplerate=self._sample_rate,
-            channels=1,
-            dtype=np.float32,
-            blocking=True,
-        )
-        return chunk.flatten()
+    def _audio_callback(self, indata, frames, time, status):
+        if not self._running or self._mode_name is None:
+            return
+            
+        try:
+            chunk = indata.flatten()
+            mags = self._compute_fft(chunk)
+            
+            mode_fn = AUDIO_MODES.get(self._mode_name)
+            if mode_fn is not None:
+                colors = mode_fn(
+                    magnitudes=mags,
+                    freq_bins=self._freq_bins,
+                    led_count=self._led_count,
+                    params=self._mode_params,
+                )
+                self.frame_ready.emit(colors)
+        except Exception as e:
+            # Не спамим ошибками из коллбека потока
+            pass
 
     def _compute_fft(self, chunk: np.ndarray) -> np.ndarray:
         """Возвращает magnitudes FFT (0..Nyquist)."""
         window = np.hanning(len(chunk))
         spectrum = np.fft.rfft(chunk * window)
         return np.abs(spectrum)
-
-    def _run_loop(self):
-        mode_fn = None
-        self.status_changed.emit("Capturing...")
-        while not self._stop_event.is_set():
-            try:
-                if self._mode_name is not None:
-                    mode_fn = AUDIO_MODES.get(self._mode_name)
-
-                if mode_fn is not None:
-                    chunk = self._capture_chunk()
-                    mags = self._compute_fft(chunk)
-                    colors = mode_fn(
-                        magnitudes=mags,
-                        freq_bins=self._freq_bins,
-                        led_count=self._led_count,
-                        params=self._mode_params,
-                    )
-                    self.frame_ready.emit(colors)
-
-                self._stop_event.wait(self._interval)
-            except Exception as e:
-                self.error_occurred.emit(f"Audio error: {e}")
-                self._stop_event.wait(0.5)
