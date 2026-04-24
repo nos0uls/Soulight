@@ -15,8 +15,10 @@ a = Analysis(
     [str(project_root / 'soulight' / 'app.py')],
     pathex=[str(project_root)],
     binaries=[
-        # .NET DLL для bridge
+        # .NET DLL для основного bridge
         (str(project_root / 'beelightLib.dll'), '.'),
+        # Быстрый C# bridge (добавлен второй нейросетью)
+        (str(project_root / 'dotnet' / 'SoulightBridge.dll'), 'dotnet'),
     ],
     datas=[
         # JSON конфиги
@@ -44,6 +46,12 @@ a = Analysis(
         'soulight.screen_mirroring.sampler',
         'soulight.screen_mirroring.screen_capture',
         'soulight.screen_mirroring.worker',
+        # Scenes: паттерн-режимы (Rainbow, Fire, Aurora...)
+        'soulight.scenes.engine',
+        'soulight.scenes.patterns',
+        # Audio: FFT аудио-режимы
+        'soulight.audio.engine',
+        'soulight.audio.modes',
     ],
     hookspath=[],
     hooksconfig={},

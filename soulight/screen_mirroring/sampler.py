@@ -78,7 +78,6 @@ def sample_frame(
     layout: ScreenMirrorLayout,
     smoother: Optional[FrameSmoother] = None,
     saturation_boost: float = 1.0,
-    brightness_gain: float = 1.0,
 ) -> SampledColors:
     # width/height layout проверяем всегда, даже если пиксели приходят как edge strips.
     # Так sampler остаётся привязан к реальному размеру исходного монитора.
@@ -95,11 +94,6 @@ def sample_frame(
         # При boost=1.0 цвет не меняется.
         if saturation_boost != 1.0:
             color = _boost_saturation(*color, saturation_boost)
-        # Brightness gain усиливает сам sampled цвет.
-        # Это важно для mirroring: средний цвет зоны почти всегда темнее,
-        # чем статический solid white режим контроллера.
-        if brightness_gain != 1.0:
-            color = _boost_brightness(*color, brightness_gain)
         logical_colors.append(color)
 
     if smoother is not None:
@@ -227,19 +221,5 @@ def _boost_saturation(r: int, g: int, b: int, boost: float) -> Tuple[int, int, i
     s = min(1.0, s * boost)
     nr, ng, nb = colorsys.hsv_to_rgb(h, s, v)
     return (_clamp(int(nr * 255)), _clamp(int(ng * 255)), _clamp(int(nb * 255)))
-
-
-# Усиливает яркость sampled RGB кортежа простым gain multiplier.
-# Это не меняет hue напрямую, а лишь поднимает канал R/G/B с clamp до 255.
-# В mirroring это полезно, потому что среднее по зоне часто визуально тусклее,
-# чем ожидаемая "максимальная" яркость ленты.
-def _boost_brightness(r: int, g: int, b: int, gain: float) -> Tuple[int, int, int]:
-    if gain == 1.0:
-        return (r, g, b)
-    return (
-        _clamp(int(r * gain)),
-        _clamp(int(g * gain)),
-        _clamp(int(b * gain)),
-    )
 
 # endregion

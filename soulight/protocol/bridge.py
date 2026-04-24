@@ -169,6 +169,18 @@ class BeelightBridge:
             except Exception as e:
                 print(f"[Bridge] Heartbeat generation failed: {e}")
 
+        self._fast_bridge_ready = False
+        try:
+            bridge_dll = os.path.join(os.path.dirname(__file__), '..', '..', 'dotnet', 'SoulightBridge.dll')
+            if os.path.exists(bridge_dll):
+                Assembly.LoadFrom(bridge_dll)
+                import SoulightBridge
+                if SoulightBridge.BeelightHelper.Init(BEELIGHT_EXE):
+                    self._fast_bridge_ready = True
+                    print("[Bridge] Fast C# bridge загружен")
+        except Exception as e:
+            print(f"[Bridge] Не удалось загрузить fast bridge: {e}")
+
         self._ready = True
         print("[Bridge] Инициализация OK")
         return True
@@ -268,8 +280,20 @@ class BeelightBridge:
 
             # Реверсируем порядок LED: контроллер адресует с конца ленты
             colors_rgb = list(reversed(colors_rgb))
+
+            # Попытка использовать быстрый C# мост
+            if getattr(self, '_fast_bridge_ready', False):
+                import SoulightBridge
+                import System
+                flat = bytearray()
+                for r, g, b in colors_rgb:
+                    flat.extend([int(r), int(g), int(b)])
+                net_bytes = System.Array[System.Byte](flat)
+                result = SoulightBridge.BeelightHelper.MakeRGBTransferPacket(net_bytes)
+                return bytes(result) if result is not None else None
+
             n = len(colors_rgb)
-            arr = Array.CreateInstance(self._rgb_type, n)
+            arr = Array.CreateInstance(self._rgbType if hasattr(self, '_rgbType') else self._rgb_type, n)
 
             flags = BindingFlags.Public | BindingFlags.Instance
             field_r = self._rgb_type.GetField("R", flags)
@@ -284,7 +308,7 @@ class BeelightBridge:
                 arr.SetValue(rgb, i)
 
             # channelMark=0xFF — обязателен для принятия контроллером
-            result = self._gen_rgb_transfer.Invoke(None, [arr, Byte(0xFF)])
+            result = self._gen_rgb_transfer.Invoke(None, [arr, NetByte(0xFF)])
             return bytes(result) if result is not None else None
         except Exception as e:
             print(f"[Bridge] make_rgb_transfer_packet error: {e}")

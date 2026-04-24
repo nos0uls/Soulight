@@ -19,8 +19,133 @@ from soulight.ui.led_config_widget import LEDConfigPanel
 from soulight.color_preset import ColorPreset
 from soulight.screen_mirroring.layout import build_layout
 from soulight.screen_mirroring.worker import MirrorWorker
+from soulight.scenes.engine import SceneEngine
+from soulight.scenes.patterns import PATTERN_LABELS
+from soulight.audio.engine import AudioEngine
+from soulight.audio.modes import MODE_LABELS
 
 
+# region QSS Theme (Catppuccin Mocha)
+DARK_STYLE = """
+QMainWindow, QWidget {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+    font-family: "Segoe UI", sans-serif;
+    font-size: 13px;
+}
+QGroupBox {
+    background-color: #181825;
+    border: 1px solid #313244;
+    border-radius: 8px;
+    margin-top: 20px;
+    padding-top: 10px;
+    font-weight: bold;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    top: 2px;
+    color: #89b4fa;
+    background-color: transparent;
+}
+QPushButton {
+    background-color: #313244;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    padding: 6px 12px;
+    color: #cdd6f4;
+    font-weight: bold;
+}
+QPushButton:hover {
+    background-color: #45475a;
+}
+QPushButton:pressed {
+    background-color: #585b70;
+}
+QPushButton:disabled {
+    background-color: #181825;
+    color: #585b70;
+    border: 1px solid #313244;
+}
+QSlider::groove:horizontal {
+    border: 1px solid #313244;
+    height: 6px;
+    background: #11111b;
+    border-radius: 3px;
+}
+QSlider::sub-page:horizontal {
+    background: #89b4fa;
+    border-radius: 3px;
+}
+QSlider::handle:horizontal {
+    background: #cdd6f4;
+    border: 1px solid #11111b;
+    width: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
+}
+QSlider::handle:horizontal:hover {
+    background: #b4befe;
+}
+QTabWidget::pane {
+    border: 1px solid #313244;
+    border-radius: 6px;
+    top: -1px;
+    background-color: #1e1e2e;
+}
+QTabBar::tab {
+    background: #181825;
+    color: #a6adc8;
+    padding: 8px 16px;
+    border: 1px solid #313244;
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    margin-right: 2px;
+}
+QTabBar::tab:selected {
+    background: #1e1e2e;
+    color: #cdd6f4;
+    font-weight: bold;
+    border-bottom: 2px solid #89b4fa;
+}
+QTabBar::tab:hover:!selected {
+    background: #313244;
+}
+QComboBox {
+    background-color: #11111b;
+    border: 1px solid #313244;
+    border-radius: 4px;
+    padding: 4px 8px;
+    color: #cdd6f4;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+QComboBox::down-arrow {
+    image: none;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 5px solid #a6adc8;
+    margin-right: 5px;
+}
+QComboBox QAbstractItemView {
+    background-color: #181825;
+    border: 1px solid #313244;
+    selection-background-color: #313244;
+    color: #cdd6f4;
+}
+QLineEdit {
+    background-color: #11111b;
+    border: 1px solid #313244;
+    border-radius: 4px;
+    padding: 4px 8px;
+    color: #cdd6f4;
+}
+"""
+# endregion
 # region Пресеты цветов — быстрые кнопки для частых цветов
 COLOR_PRESETS = [
     ("Red",        255,   0,   0),
@@ -81,7 +206,7 @@ class ColorPreview(QFrame):
         self._color = QColor(255, 0, 255)
         self.setMinimumSize(200, 80)
         self.setFrameShape(QFrame.Shape.Box)
-        self.setStyleSheet("border: 2px solid #555; border-radius: 8px;")
+        self.setStyleSheet("border: 2px solid #313244; border-radius: 8px; background-color: transparent;")
 
     def set_color(self, r, g, b):
         """Обновляет цвет предпросмотра."""
@@ -123,6 +248,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Soulight")
         self.setMinimumSize(520, 680)
+        self.setStyleSheet(DARK_STYLE)
 
         # LED driver (protocol bridge + serial)
         self._driver = LEDDriver()
@@ -130,7 +256,7 @@ class MainWindow(QMainWindow):
         self._color_preset = ColorPreset()
         self._color_preset.load()
         # Track which tab is active
-        self._current_tab = 0  # 0=Color, 1=LED Config
+        self._current_tab = 0  # 0=Color, 1=LED Config, 2=Screen Mirror, 3=Scenes, 4=Audio
         # Счётчик и режим автоподключения при старте приложения.
         # Эти поля помогают аккуратно сделать до 5 попыток без блокировки UI.
         self._auto_connect_attempt = 0
@@ -150,6 +276,14 @@ class MainWindow(QMainWindow):
         self._mirror_thread = None   # QThread
         self._mirror_worker = None   # MirrorWorker
         self._mirror_frame_pending = False  # Защита от накопления запросов
+        # Scene engine: паттерн-режимы (Rainbow, Fire, Aurora...)
+        self._scene_engine = None
+        self._scene_active = False
+        self._scene_thread = None
+        # Audio engine: FFT аудио-режимы (Spectrum, Electronic, Lyricism)
+        self._audio_engine = None
+        self._audio_active = False
+        self._audio_thread = None
         # Этот флаг нужен, чтобы bulk-обновление слайдеров из пресета
         # не переводило preset selector в Custom посреди применения.
         self._applying_mirror_preset = False
@@ -221,6 +355,22 @@ class MainWindow(QMainWindow):
         screen_layout.setContentsMargins(8, 8, 8, 8)
         self._build_screen_mirror_tab(screen_layout)
         self._tabs.addTab(screen_page, "Screen Mirror")
+
+        # Вкладка 4: Scenes
+        scenes_page = QWidget()
+        scenes_layout = QVBoxLayout(scenes_page)
+        scenes_layout.setSpacing(12)
+        scenes_layout.setContentsMargins(8, 8, 8, 8)
+        self._build_scenes_tab(scenes_layout)
+        self._tabs.addTab(scenes_page, "Scenes")
+
+        # Вкладка 5: Audio
+        audio_page = QWidget()
+        audio_layout = QVBoxLayout(audio_page)
+        audio_layout.setSpacing(12)
+        audio_layout.setContentsMargins(8, 8, 8, 8)
+        self._build_audio_tab(audio_layout)
+        self._tabs.addTab(audio_page, "Audio")
 
         # Tab change handler для управления состоянием ленты
         self._tabs.currentChanged.connect(self._on_tab_changed)
@@ -315,6 +465,27 @@ class MainWindow(QMainWindow):
         onoff_layout.addWidget(self._btn_off)
         layout.addLayout(onoff_layout)
 
+        # === Speed Mode — быстрый выбор частоты обновления ===
+        speed_group = QGroupBox("Speed Mode")
+        speed_layout = QHBoxLayout(speed_group)
+        self._speed_buttons = {}
+        for label, interval, tooltip in [
+            ("Smooth", 0.120, "Slow and smooth (~8 FPS)"),
+            ("Normal", 0.070, "Balanced (~14 FPS)"),
+            ("Fast", 0.040, "Fast and reactive (~25 FPS)"),
+        ]:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setFixedHeight(32)
+            btn.setToolTip(tooltip)
+            btn.clicked.connect(lambda checked, iv=interval, lb=label: self._on_speed_mode_clicked(iv, lb))
+            speed_layout.addWidget(btn)
+            self._speed_buttons[label] = btn
+        # Normal по умолчанию
+        self._speed_buttons["Normal"].setChecked(True)
+        self._driver._send_interval = 0.070
+        layout.addWidget(speed_group)
+
         layout.addStretch()
 
     def _build_screen_mirror_tab(self, layout):
@@ -402,14 +573,13 @@ class MainWindow(QMainWindow):
         sat_row.addWidget(self._mirror_sat_label)
         tuning_layout.addLayout(sat_row)
 
-        # Brightness — яркость LED при mirroring (0-255)
+        # Brightness — аппаратная яркость LED при mirroring (0-255)
         self._mirror_brightness_slider, self._mirror_brightness_label = self._make_slider(
-            "Brightness", 100, self._on_mirror_brightness_changed
+            "Brightness", 255, self._on_mirror_brightness_changed
         )
-        # Здесь это именно software gain для mirroring-картинки, а не master dimmer.
-        # 100% = без изменений, 200% = примерно вдвое ярче до clamp.
-        self._mirror_brightness_slider.setRange(25, 300)
-        self._mirror_brightness_label.setText("100%")
+        # Теперь это напрямую управляет Hardware Dimmer контроллера
+        self._mirror_brightness_slider.setRange(0, 255)
+        self._mirror_brightness_label.setText("255")
         brightness_row = QHBoxLayout()
         brightness_row.addWidget(QLabel("Brightness"))
         brightness_row.addWidget(self._mirror_brightness_slider)
@@ -420,10 +590,10 @@ class MainWindow(QMainWindow):
 
         # FPS — частота кадров mirroring
         self._mirror_fps_slider, self._mirror_fps_label = self._make_slider(
-            "FPS", 15, self._on_mirror_fps_changed
+            "FPS", 60, self._on_mirror_fps_changed
         )
-        self._mirror_fps_slider.setRange(5, 30)
-        self._mirror_fps_label.setText("15")
+        self._mirror_fps_slider.setRange(5, 60)
+        self._mirror_fps_label.setText("60")
         fps_row = QHBoxLayout()
         fps_row.addWidget(QLabel("FPS"))
         fps_row.addWidget(self._mirror_fps_slider)
@@ -627,7 +797,6 @@ class MainWindow(QMainWindow):
             "edge_fraction": self._mirror_edge_fraction(),
             "smoothing_factor": self._mirror_smoothing_factor(),
             "saturation_boost": self._mirror_saturation_boost(),
-            "brightness_gain": self._mirror_brightness_gain(),
         }
 
     def _restart_screen_mirroring(self):
@@ -806,12 +975,15 @@ class MainWindow(QMainWindow):
             self._queue_mirror_restart()
 
     def _on_mirror_brightness_changed(self):
-        """Обновляет label и live-применяет software brightness gain в mirroring."""
-        self._mirror_brightness_label.setText(f"{self._mirror_brightness_slider.value()}%")
+        """Синхронизирует ползунок Mirroring с основным Hardware Brightness."""
+        val = self._mirror_brightness_slider.value()
+        self._mirror_brightness_label.setText(str(val))
         if not self._applying_mirror_preset:
             self._set_mirror_preset_combo_value("custom")
-        if self._screen_mirroring_active:
-            self._queue_mirror_restart()
+        
+        # Блокируем сигналы мастер-слайдера, чтобы избежать рекурсии, если понадобится,
+        # но в данном случае достаточно просто вызвать setValue
+        self._slider_bright.setValue(val)
 
     def _on_mirror_fps_changed(self):
         """Обновляет label и перестраивает интервал таймера."""
@@ -858,16 +1030,22 @@ class MainWindow(QMainWindow):
         0 = Color: восстанавливаем solid color preset
         1 = LED Config: гасим вывод, ждём Live Preview / Confirm
         2 = Screen Mirror: гасим solid, mirroring стартует кнопкой
+        3 = Scenes: гасим solid, scenes стартуют кнопкой
+        4 = Audio: гасим solid, audio стартует кнопкой
         """
         prev_tab = self._current_tab
         self._current_tab = index
 
-        if not self._driver.connected:
-            return
-
-        # При уходе с вкладки Screen Mirror — останавливаем mirroring
+        # При уходе с активных вкладок — останавливаем их потоки
         if prev_tab == 2 and index != 2:
             self._stop_screen_mirroring(restore_output=False)
+        if prev_tab == 3 and index != 3:
+            self._stop_scenes()
+        if prev_tab == 4 and index != 4:
+            self._stop_audio()
+
+        if not self._driver.connected:
+            return
 
         if index == 0:  # Возврат на Color tab
             r, g, b = self._color_preset.as_tuple()
@@ -878,7 +1056,7 @@ class MainWindow(QMainWindow):
                 self._send_led_config_preview()
             else:
                 self._driver.set_color(0, 0, 0)
-        elif index == 2:  # Переход в Screen Mirror
+        elif index in (2, 3, 4):  # Screen Mirror / Scenes / Audio
             self._driver.set_color(0, 0, 0)
 
     def _on_led_config_confirmed(self):
@@ -945,15 +1123,20 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_brightness_changed(self, value):
-        """Изменилась яркость."""
+        """Изменилась мастер-яркость."""
         self._label_bright.setText(str(value))
         # Сохраняем preset
         self._color_preset.set_brightness(value)
         self._color_preset.save()
         # Всегда синхронизируем яркость в драйвер.
-        # Так сохранённое значение уже лежит в памяти драйвера
-        # к моменту первого подключения.
         self._driver.set_brightness(value)
+        
+        # Синхронизируем Mirroring слайдер, чтобы они не разъезжались
+        if self._mirror_brightness_slider.value() != value:
+            self._mirror_brightness_slider.blockSignals(True)
+            self._mirror_brightness_slider.setValue(value)
+            self._mirror_brightness_label.setText(str(value))
+            self._mirror_brightness_slider.blockSignals(False)
 
     def _on_connect(self):
         """Подключение к контроллеру."""
@@ -1022,6 +1205,8 @@ class MainWindow(QMainWindow):
         """Отключение от контроллера."""
         self._is_auto_connecting = False
         self._stop_screen_mirroring(restore_output=False)
+        self._stop_scenes()
+        self._stop_audio()
         self._driver.disconnect()
         self._status_label.setText("Disconnected")
         self._status_label.setStyleSheet("color: #cc3333; font-weight: bold;")
@@ -1065,20 +1250,242 @@ class MainWindow(QMainWindow):
     def _send_current_color(self):
         """
         Отправляет текущий цвет на LED ленту (если подключено).
-        Отправляется только если на вкладке Color.
+        Отправляется только если на вкладке Color и нет активных режимов.
         """
         # Сохраняем preset
         self._color_preset.set_color(self._r, self._g, self._b)
         self._color_preset.save()
-        # Отправляем только если на Color tab и mirroring не активен
-        if self._driver.connected and self._current_tab == 0 and not self._screen_mirroring_active:
+        # Отправляем только если на Color tab и ничто другое не активно
+        if (self._driver.connected
+                and self._current_tab == 0
+                and not self._screen_mirroring_active
+                and not self._scene_active
+                and not self._audio_active):
             self._driver.set_color(self._r, self._g, self._b)
 
     # endregion
 
+    # region Scenes tab
+
+    def _build_scenes_tab(self, layout):
+        """Строит вкладку Scenes: выбор паттерна, speed, start/stop."""
+        self._scene_status_label = QLabel("Idle")
+        self._scene_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
+        layout.addWidget(self._scene_status_label)
+
+        pattern_group = QGroupBox("Pattern")
+        pattern_layout = QVBoxLayout(pattern_group)
+        self._scene_pattern_combo = QComboBox()
+        for key, label in PATTERN_LABELS.items():
+            self._scene_pattern_combo.addItem(label, key)
+        pattern_layout.addWidget(self._scene_pattern_combo)
+        layout.addWidget(pattern_group)
+
+        speed_group = QGroupBox("Speed")
+        speed_layout = QHBoxLayout(speed_group)
+        self._scene_speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self._scene_speed_slider.setRange(25, 400)
+        self._scene_speed_slider.setValue(100)
+        self._scene_speed_slider.setToolTip("Animation speed (25% - 400%)")
+        self._scene_speed_label = QLabel("100%")
+        self._scene_speed_slider.valueChanged.connect(self._on_scene_speed_changed)
+        speed_layout.addWidget(self._scene_speed_slider)
+        self._scene_speed_label.setFixedWidth(40)
+        speed_layout.addWidget(self._scene_speed_label)
+        layout.addWidget(speed_group)
+
+        btn_row = QHBoxLayout()
+        self._btn_scene_start = QPushButton("Start")
+        self._btn_scene_start.setFixedHeight(36)
+        self._btn_scene_start.setStyleSheet(
+            "background-color: #2d8c2d; color: white; font-weight: bold; border-radius: 6px;"
+        )
+        self._btn_scene_start.clicked.connect(self._on_scene_start_clicked)
+        btn_row.addWidget(self._btn_scene_start)
+        self._btn_scene_stop = QPushButton("Stop")
+        self._btn_scene_stop.setFixedHeight(36)
+        self._btn_scene_stop.setStyleSheet(
+            "background-color: #cc3333; color: white; font-weight: bold; border-radius: 6px;"
+        )
+        self._btn_scene_stop.setEnabled(False)
+        self._btn_scene_stop.clicked.connect(self._stop_scenes)
+        btn_row.addWidget(self._btn_scene_stop)
+        layout.addLayout(btn_row)
+        layout.addStretch()
+
+    def _on_scene_speed_changed(self):
+        v = self._scene_speed_slider.value()
+        self._scene_speed_label.setText(f"{v}%")
+        if self._scene_engine is not None:
+            self._scene_engine.set_speed(v / 100.0)
+
+    def _on_scene_start_clicked(self):
+        if not self._driver.connected:
+            QMessageBox.warning(self, "Not connected", "Connect to the controller first.")
+            return
+        self._start_scenes(self._scene_pattern_combo.currentData())
+
+    def _start_scenes(self, pattern_name: str):
+        self._stop_scenes()
+        self._scene_thread = QThread()
+        self._scene_engine = SceneEngine(led_count=75, fps=20)
+        self._scene_engine.moveToThread(self._scene_thread)
+        self._scene_engine.frame_ready.connect(self._on_scene_frame_ready)
+        self._scene_engine.error_occurred.connect(self._on_scene_error)
+        self._scene_thread.started.connect(lambda: self._scene_engine.start(pattern_name))
+        self._scene_thread.start()
+        self._scene_active = True
+        self._scene_engine.set_speed(self._scene_speed_slider.value() / 100.0)
+        self._scene_status_label.setText(f"Running: {PATTERN_LABELS.get(pattern_name, pattern_name)}")
+        self._scene_status_label.setStyleSheet("color: #2d8c2d; font-weight: bold;")
+        self._btn_scene_start.setEnabled(False)
+        self._btn_scene_stop.setEnabled(True)
+        self._driver.set_color(0, 0, 0)
+
+    def _stop_scenes(self):
+        if self._scene_engine is not None:
+            self._scene_engine.stop()
+            self._scene_engine = None
+        if self._scene_thread is not None:
+            self._scene_thread.quit()
+            self._scene_thread.wait(2000)
+            self._scene_thread = None
+        self._scene_active = False
+        self._scene_status_label.setText("Idle")
+        self._scene_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
+        self._btn_scene_start.setEnabled(True)
+        self._btn_scene_stop.setEnabled(False)
+
+    def _on_scene_frame_ready(self, colors):
+        if self._scene_active and self._driver.connected:
+            self._driver.set_per_led_colors(colors)
+
+    def _on_scene_error(self, msg):
+        self._scene_status_label.setText(f"Error: {msg}")
+        self._scene_status_label.setStyleSheet("color: #f38ba8; font-weight: bold;")
+        self._stop_scenes()
+
+    # endregion
+
+    # region Audio tab
+
+    def _build_audio_tab(self, layout):
+        """Строит вкладку Audio: выбор режима, sensitivity, start/stop."""
+        self._audio_status_label = QLabel("Idle")
+        self._audio_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
+        layout.addWidget(self._audio_status_label)
+
+        mode_group = QGroupBox("Mode")
+        mode_layout = QVBoxLayout(mode_group)
+        self._audio_mode_combo = QComboBox()
+        for key, label in MODE_LABELS.items():
+            self._audio_mode_combo.addItem(label, key)
+        mode_layout.addWidget(self._audio_mode_combo)
+        layout.addWidget(mode_group)
+
+        sens_group = QGroupBox("Sensitivity")
+        sens_layout = QHBoxLayout(sens_group)
+        self._audio_sens_slider = QSlider(Qt.Orientation.Horizontal)
+        self._audio_sens_slider.setRange(10, 500)
+        self._audio_sens_slider.setValue(150)
+        self._audio_sens_label = QLabel("150%")
+        self._audio_sens_slider.valueChanged.connect(self._on_audio_sens_changed)
+        sens_layout.addWidget(self._audio_sens_slider)
+        self._audio_sens_label.setFixedWidth(40)
+        sens_layout.addWidget(self._audio_sens_label)
+        layout.addWidget(sens_group)
+
+        btn_row = QHBoxLayout()
+        self._btn_audio_start = QPushButton("Start")
+        self._btn_audio_start.setFixedHeight(36)
+        self._btn_audio_start.setStyleSheet(
+            "background-color: #2d8c2d; color: white; font-weight: bold; border-radius: 6px;"
+        )
+        self._btn_audio_start.clicked.connect(self._on_audio_start_clicked)
+        btn_row.addWidget(self._btn_audio_start)
+        self._btn_audio_stop = QPushButton("Stop")
+        self._btn_audio_stop.setFixedHeight(36)
+        self._btn_audio_stop.setStyleSheet(
+            "background-color: #cc3333; color: white; font-weight: bold; border-radius: 6px;"
+        )
+        self._btn_audio_stop.setEnabled(False)
+        self._btn_audio_stop.clicked.connect(self._stop_audio)
+        btn_row.addWidget(self._btn_audio_stop)
+        layout.addLayout(btn_row)
+        layout.addStretch()
+
+    def _on_audio_sens_changed(self):
+        v = self._audio_sens_slider.value()
+        self._audio_sens_label.setText(f"{v}%")
+        if self._audio_engine is not None:
+            self._audio_engine.set_sensitivity(v / 100.0)
+
+    def _on_audio_start_clicked(self):
+        if not self._driver.connected:
+            QMessageBox.warning(self, "Not connected", "Connect to the controller first.")
+            return
+        self._start_audio(self._audio_mode_combo.currentData())
+
+    def _start_audio(self, mode_name: str):
+        self._stop_audio()
+        self._audio_thread = QThread()
+        self._audio_engine = AudioEngine(led_count=75, fps=20)
+        self._audio_engine.moveToThread(self._audio_thread)
+        self._audio_engine.frame_ready.connect(self._on_audio_frame_ready)
+        self._audio_engine.error_occurred.connect(self._on_audio_error)
+        self._audio_engine.status_changed.connect(self._on_audio_status_changed)
+        self._audio_thread.started.connect(lambda: self._audio_engine.start(mode_name))
+        self._audio_thread.start()
+        self._audio_active = True
+        self._audio_engine.set_sensitivity(self._audio_sens_slider.value() / 100.0)
+        self._audio_status_label.setText(f"Starting: {MODE_LABELS.get(mode_name, mode_name)}...")
+        self._audio_status_label.setStyleSheet("color: #cc9933; font-weight: bold;")
+        self._btn_audio_start.setEnabled(False)
+        self._btn_audio_stop.setEnabled(True)
+        self._driver.set_color(0, 0, 0)
+
+    def _stop_audio(self):
+        if self._audio_engine is not None:
+            self._audio_engine.stop()
+            self._audio_engine = None
+        if self._audio_thread is not None:
+            self._audio_thread.quit()
+            self._audio_thread.wait(2000)
+            self._audio_thread = None
+        self._audio_active = False
+        self._audio_status_label.setText("Idle")
+        self._audio_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
+        self._btn_audio_start.setEnabled(True)
+        self._btn_audio_stop.setEnabled(False)
+
+    def _on_audio_frame_ready(self, colors):
+        if self._audio_active and self._driver.connected:
+            self._driver.set_per_led_colors(colors)
+
+    def _on_audio_error(self, msg):
+        self._audio_status_label.setText(f"Error: {msg}")
+        self._audio_status_label.setStyleSheet("color: #f38ba8; font-weight: bold;")
+        self._stop_audio()
+
+    def _on_audio_status_changed(self, status):
+        self._audio_status_label.setText(status)
+
+    # endregion
+
+    # region Speed mode
+
+    def _on_speed_mode_clicked(self, interval, label):
+        for lb, btn in self._speed_buttons.items():
+            btn.setChecked(lb == label)
+        self._driver._send_interval = interval
+
+    # endregion
+
     def closeEvent(self, event):
-        """При закрытии окна останавливаем mirroring и отключаемся."""
+        """При закрытии окна останавливаем mirroring, scenes, audio и отключаемся."""
         self._stop_screen_mirroring(restore_output=False)
+        self._stop_scenes()
+        self._stop_audio()
         if self._driver.connected:
             self._driver.disconnect()
         event.accept()

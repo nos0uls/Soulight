@@ -65,6 +65,7 @@ class ScreenCapturer:
         # DXCam camera instance для быстрого DirectX capture.
         # Создаётся лениво при первом вызове, если доступен.
         self._dxcam_camera = None
+        self._last_dxcam_bgra = None
         self._use_dxcam = DXCAM_AVAILABLE and prefer_dxcam
         self._dxcam_failed = False
         # Эти счётчики нужны только для диагностики.
@@ -210,59 +211,48 @@ class ScreenCapturer:
         monitor_height = self._dxcam_camera.height
         edge_depth = max(1, min(int(edge_depth), monitor_width, monitor_height))
         
-        # DXCam возвращает RGB (не BGRA), поэтому нужна конверсия.
-        # Захватываем 4 edge regions отдельно.
-        edge_regions = {}
+        # Делаем один захват всего экрана. 
+        # DXCam возвращает RGB numpy array или None (если экран не изменился).
+        frame_rgb = self._dxcam_camera.grab()
         
-        # Top strip
-        region = (0, 0, monitor_width, edge_depth)
-        frame_rgb = self._dxcam_camera.grab(region=region)
         if frame_rgb is None:
-            raise RuntimeError("DXCam grab returned None")
-        # Конвертируем RGB → BGRA для совместимости с sampler.
-        bgra = self._rgb_to_bgra(frame_rgb)
-        edge_regions["top"] = CaptureRegion(
-            left=0, top=0, width=monitor_width, height=edge_depth, bgra=bgra
-        )
-        
-        # Bottom strip
-        region = (0, monitor_height - edge_depth, monitor_width, monitor_height)
-        frame_rgb = self._dxcam_camera.grab(region=region)
-        if frame_rgb is None:
-            raise RuntimeError("DXCam grab returned None")
-        bgra = self._rgb_to_bgra(frame_rgb)
-        edge_regions["bottom"] = CaptureRegion(
-            left=0, top=monitor_height - edge_depth,
-            width=monitor_width, height=edge_depth, bgra=bgra
-        )
-        
-        # Left strip
-        region = (0, 0, edge_depth, monitor_height)
-        frame_rgb = self._dxcam_camera.grab(region=region)
-        if frame_rgb is None:
-            raise RuntimeError("DXCam grab returned None")
-        bgra = self._rgb_to_bgra(frame_rgb)
-        edge_regions["left"] = CaptureRegion(
-            left=0, top=0, width=edge_depth, height=monitor_height, bgra=bgra
-        )
-        
-        # Right strip
-        region = (monitor_width - edge_depth, 0, monitor_width, monitor_height)
-        frame_rgb = self._dxcam_camera.grab(region=region)
-        if frame_rgb is None:
-            raise RuntimeError("DXCam grab returned None")
-        bgra = self._rgb_to_bgra(frame_rgb)
-        edge_regions["right"] = CaptureRegion(
-            left=monitor_width - edge_depth, top=0,
-            width=edge_depth, height=monitor_height, bgra=bgra
-        )
+            # Экран не обновился. Используем кэш.
+            if self._last_dxcam_bgra is None:
+                # Еще нет ни одного кадра (например, сразу после старта). 
+                # Фолбэчимся на MSS временно, чтобы не падать.
+                return self._capture_edges_mss(edge_depth)
+            bgra = self._last_dxcam_bgra
+        else:
+            # Конвертируем RGB → BGRA для совместимости с sampler и сохраняем в кэш
+            bgra = self._rgb_to_bgra(frame_rgb)
+            self._last_dxcam_bgra = bgra
+            
+        # Нарезаем 4 edge regions отдельно (через быстрые numpy slices)
+        edge_regions = {
+            "top": CaptureRegion(
+                left=0, top=0, width=monitor_width, height=edge_depth, 
+                bgra=bgra[:edge_depth, :, :].copy()
+            ),
+            "bottom": CaptureRegion(
+                left=0, top=monitor_height - edge_depth, width=monitor_width, height=edge_depth, 
+                bgra=bgra[monitor_height - edge_depth:, :, :].copy()
+            ),
+            "left": CaptureRegion(
+                left=0, top=0, width=edge_depth, height=monitor_height, 
+                bgra=bgra[:, :edge_depth, :].copy()
+            ),
+            "right": CaptureRegion(
+                left=monitor_width - edge_depth, top=0, width=edge_depth, height=monitor_height, 
+                bgra=bgra[:, monitor_width - edge_depth:, :].copy()
+            ),
+        }
         
         if self._capture_attempts <= 3:
             self._debug_log(
                 "dxcam-edge-capture",
                 (
                     f"attempt={self._capture_attempts} full={monitor_width}x{monitor_height} "
-                    f"depth={edge_depth}"
+                    f"depth={edge_depth} (single grab + caching)"
                 ),
             )
         

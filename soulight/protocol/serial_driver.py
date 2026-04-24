@@ -59,8 +59,9 @@ class LEDDriver:
         self._current_per_led = None
         # Текущая яркость (0-255)
         self._brightness = 255
-        # Интервал между пакетами в секундах (~15 пакетов/сек)
-        self._send_interval = 0.070
+        # Интервал между пакетами в секундах
+        # 15ms позволяет отсылать до 66 пакетов в секунду (честные 60 FPS для mirroring)
+        self._send_interval = 0.015
         # Heartbeat каждые N color пакетов
         self._hb_every = 10
 
@@ -238,39 +239,43 @@ class LEDDriver:
     def _send_loop(self):
         """
         Background thread: непрерывно отправляет brightness + color + heartbeat.
-        Работает аналогично C# LPColorBridge — ~15 пакетов/сек.
         Контроллер требует постоянного потока пакетов для стабильного горения.
         """
         hb = self._bridge.get_heartbeat()
         count = 0
+        last_bright = None
 
         while not self._send_stop.is_set():
             per_led = self._current_per_led
             color = self._current_color
-
-            if per_led is not None:
-                # Per-LED режим: отправляем brightness + RGB transfer
+            
+            # Динамически отсылаем яркость при любом изменении (даже в per_led режиме)
+            if self._brightness != last_bright:
                 bright_pkt = self._bridge.make_bright_packet(self._brightness)
                 self._safe_write(bright_pkt)
                 time.sleep(0.005)
+                last_bright = self._brightness
 
+            if per_led is not None:
+                # Per-LED режим: отправляем RGB transfer
                 rgb_pkt = self._bridge.make_rgb_transfer_packet(per_led)
                 self._safe_write(rgb_pkt)
                 count += 1
 
                 if count % self._hb_every == 0:
                     self._safe_write(hb)
-                    time.sleep(0.005)
 
                 time.sleep(self._send_interval)
 
             elif color is not None:
                 r, g, b = color
 
-                # Brightness перед каждым color (контроллер сбрасывает dimmer)
-                bright_pkt = self._bridge.make_bright_packet(self._brightness)
-                self._safe_write(bright_pkt)
-                time.sleep(0.005)
+                # Solid Color режим:
+                # Контроллер сбрасывает dimmer иногда, поэтому дублируем яркость каждые 50 пакетов
+                if count % 50 == 0:
+                    bright_pkt = self._bridge.make_bright_packet(self._brightness)
+                    self._safe_write(bright_pkt)
+                    time.sleep(0.005)
 
                 # Color пакет
                 color_pkt = self._bridge.make_color_packet(r, g, b)
@@ -300,13 +305,8 @@ class LEDDriver:
             return
         try:
             with self._write_lock:
-                # Разделяем frame header и payload для корректного приёма
-                if len(data) > 5 and data[:3] == b'\x55\xAA\x5A':
-                    self._serial.write(data[:5])
-                    self._serial.flush()
-                    time.sleep(0.003)
-                    self._serial.write(data[5:])
-                else:
-                    self._serial.write(data)
+                self._serial.write(data)
+                # Убрали искусственное разделение заголовка и паузу 15мс (time.sleep(0.003)),
+                # так как CH340 / USB должен сам справляться с фреймами, а пауза убивала FPS.
         except Exception:
             pass
