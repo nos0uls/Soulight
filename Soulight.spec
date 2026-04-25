@@ -52,6 +52,9 @@ a = Analysis(
         # Audio: FFT аудио-режимы
         'soulight.audio.engine',
         'soulight.audio.modes',
+        # soundcard: захват аудио (микрофон и WASAPI loopback)
+        'soundcard',
+        'soundcard.mediafoundation',
     ],
     hookspath=[],
     hooksconfig={},
