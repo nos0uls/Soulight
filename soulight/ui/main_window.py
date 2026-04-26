@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QSlider, QPushButton, QLineEdit, QGridLayout,
     QGroupBox, QFrame, QSizePolicy, QMessageBox, QTabWidget,
-    QComboBox,
+    QComboBox, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QLinearGradient, QMouseEvent, QFont
