@@ -37,6 +37,7 @@ class MirrorWorker(QObject):
         edge_fraction,
         smoothing_factor,
         saturation_boost,
+        prefer_dxcam=True,
         parent=None,
     ):
         super().__init__(parent)
@@ -45,6 +46,7 @@ class MirrorWorker(QObject):
         self._edge_fraction = float(edge_fraction)
         self._smoothing_factor = float(smoothing_factor)
         self._saturation_boost = float(saturation_boost)
+        self._prefer_dxcam = bool(prefer_dxcam)
         self._engine: ScreenMirrorEngine = None
         # Этот счётчик помогает залогировать только первые удачные кадры.
         # Так мы видим, что worker реально продолжает жить после старта.
@@ -82,6 +84,7 @@ class MirrorWorker(QObject):
                     (
                         f"monitor={self._monitor_index} edge={self._edge_fraction:.3f} "
                         f"smooth={self._smoothing_factor:.3f} sat={self._saturation_boost:.3f} "
+                        f"dxcam={self._prefer_dxcam}"
                     ),
                 )
                 try:
@@ -91,6 +94,7 @@ class MirrorWorker(QObject):
                         edge_fraction=self._edge_fraction,
                         smoothing_factor=self._smoothing_factor,
                         saturation_boost=self._saturation_boost,
+                        prefer_dxcam=self._prefer_dxcam,
                     )
                     self._engine.rebuild_layout()
                 except Exception as engine_error:

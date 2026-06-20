@@ -571,13 +571,14 @@ class LEDConfigPanel(QWidget):
         """Live Preview checkbox переключён."""
         self._live_preview = (state == Qt.CheckState.Checked.value)
         self.live_preview_changed.emit(self._live_preview)
-        # При включении Live Preview сразу отправляем текущую конфигурацию
+        # При включении Live Preview сразу отправляем текущую конфигурацию,
+        # но только если она валидна.
         if self._live_preview:
-            self.config_confirmed.emit()
+            self._maybe_send_preview()
 
     def _on_count_changed(self, side, value):
-        """Изменилось количество LED на стороне (с учётом лимита 75)."""
-        self._config.set_count(side, value)
+        """Изменилось количество LED на стороне (с учётом лимита 75 и offset)."""
+        self._config.set_count(side, value, max_total=self._effective_max())
         # SpinBox мог быть ограничен — обновляем отображение
         actual = self._config.counts[side]
         if actual != value:
@@ -587,23 +588,19 @@ class LEDConfigPanel(QWidget):
             spin.blockSignals(False)
         self._update_total()
         self._monitor.update()
-        # Если Live Preview включён, отправляем обновление
-        if self._live_preview:
-            self.config_confirmed.emit()
+        self._maybe_send_preview()
 
     def _on_corner_changed(self, index):
         """Изменился начальный угол."""
         self._config.start_corner = self._corner_combo.currentData()
         self._monitor.update()
-        if self._live_preview:
-            self.config_confirmed.emit()
+        self._maybe_send_preview()
 
     def _on_dir_changed(self, index):
         """Изменилось направление обхода."""
         self._config.clockwise = self._dir_combo.currentData()
         self._monitor.update()
-        if self._live_preview:
-            self.config_confirmed.emit()
+        self._maybe_send_preview()
 
     def _on_offset_changed(self, value):
         """
@@ -612,15 +609,12 @@ class LEDConfigPanel(QWidget):
         """
         self._config.start_offset = value
         self._update_total()
-        if self._live_preview:
-            self.config_confirmed.emit()
+        self._maybe_send_preview()
 
     def _on_monitor_changed(self):
         """Монитор-виджет изменил состояние LED (drag/click)."""
         self._update_total()
-        # Если Live Preview включён, отправляем обновление
-        if self._live_preview:
-            self.config_confirmed.emit()
+        self._maybe_send_preview()
 
     def _on_side_toggle(self, side):
         """Переключает все LED на стороне (если все включены — выключаем, иначе включаем)."""
@@ -629,20 +623,34 @@ class LEDConfigPanel(QWidget):
         self._config.set_side(side, not all_on)
         self._update_total()
         self._monitor.update()
-        if self._live_preview:
-            self.config_confirmed.emit()
+        self._maybe_send_preview()
 
     def _select_all(self, on):
         """Включает/выключает все LED."""
         self._config.set_all(on)
         self._update_total()
         self._monitor.update()
-        if self._live_preview:
-            self.config_confirmed.emit()
+        self._maybe_send_preview()
 
     def _effective_max(self):
         """Эффективный лимит LED с учётом offset: MAX_LEDS - offset."""
         return MAX_LEDS - self._config.start_offset
+
+    def _is_valid_config(self):
+        """True, если total + offset не превышает MAX_LEDS."""
+        return self._config.total + self._config.start_offset <= MAX_LEDS
+
+    def _maybe_send_preview(self):
+        """Отправляет Live Preview только если конфигурация валидна."""
+        if not self._live_preview:
+            return
+        if self._is_valid_config():
+            self._total_label.setToolTip("")
+            self.config_confirmed.emit()
+        else:
+            self._total_label.setToolTip(
+                "Total + offset exceeds MAX_LEDS. Live preview blocked."
+            )
 
     def _update_total(self):
         """Обновляет отображение общего количества LED и ограничивает SpinBox."""
@@ -661,8 +669,9 @@ class LEDConfigPanel(QWidget):
             spin.blockSignals(False)
 
     def _on_reset(self):
-        """Сбрасывает конфигурацию к значениям по умолчанию."""
+        """Сбрасывает конфигурацию к значениям по умолчанию и сохраняет её."""
         self._config = LEDConfig()
+        self._config.save()
         self._monitor.set_config(self._config)
         for side, spin in self._spin.items():
             spin.blockSignals(True)
@@ -672,6 +681,7 @@ class LEDConfigPanel(QWidget):
         self._corner_combo.setCurrentIndex(0)
         self._dir_combo.setCurrentIndex(0)
         self._offset_spin.setValue(0)
+        self._maybe_send_preview()
 
     def _on_confirm(self):
         """Сохраняет конфигурацию. Блокирует если total + offset > MAX_LEDS."""

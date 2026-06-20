@@ -194,6 +194,10 @@ class LEDDriver:
         pkt = self._bridge.make_switch_packet(on)
         self._safe_write(pkt)
 
+    def set_send_interval(self, interval: float):
+        """Публичный setter для интервала между пакетами (seconds)."""
+        self._send_interval = max(0.001, float(interval))
+
     # === Внутренние методы ===
 
     def _handshake(self):
@@ -244,16 +248,24 @@ class LEDDriver:
         hb = self._bridge.get_heartbeat()
         count = 0
         last_bright = None
+        last_mode = None  # "per_led" | "solid" | "idle"
 
         while not self._send_stop.is_set():
             per_led = self._current_per_led
             color = self._current_color
-            
+
+            # Определяем текущий режим и сбрасываем счётчик при смене,
+            # чтобы heartbeat не дрейфовал между per_led/solid/none.
+            current_mode = "per_led" if per_led is not None else ("solid" if color is not None else "idle")
+            if current_mode != last_mode:
+                count = 0
+                last_mode = current_mode
+
             # Динамически отсылаем яркость при любом изменении (даже в per_led режиме)
             if self._brightness != last_bright:
                 bright_pkt = self._bridge.make_bright_packet(self._brightness)
                 self._safe_write(bright_pkt)
-                time.sleep(0.005)
+                self._send_stop.wait(0.005)
                 last_bright = self._brightness
 
             if per_led is not None:
@@ -265,7 +277,7 @@ class LEDDriver:
                 if count % self._hb_every == 0:
                     self._safe_write(hb)
 
-                time.sleep(self._send_interval)
+                self._send_stop.wait(self._send_interval)
 
             elif color is not None:
                 r, g, b = color
@@ -275,7 +287,7 @@ class LEDDriver:
                 if count % 50 == 0:
                     bright_pkt = self._bridge.make_bright_packet(self._brightness)
                     self._safe_write(bright_pkt)
-                    time.sleep(0.005)
+                    self._send_stop.wait(0.005)
 
                 # Color пакет
                 color_pkt = self._bridge.make_color_packet(r, g, b)
@@ -285,13 +297,13 @@ class LEDDriver:
                 # Heartbeat каждые N пакетов
                 if count % self._hb_every == 0:
                     self._safe_write(hb)
-                    time.sleep(0.005)
+                    self._send_stop.wait(0.005)
 
-                time.sleep(self._send_interval)
+                self._send_stop.wait(self._send_interval)
             else:
                 # Нет цвета — только heartbeat раз в 500ms
                 self._safe_write(hb)
-                time.sleep(0.5)
+                self._send_stop.wait(0.5)
 
     def _safe_write(self, data):
         """

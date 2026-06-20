@@ -16,11 +16,6 @@ import sys
 # чтобы хвостовые LED не оставались со старым состоянием.
 MAX_PACKET_LEDS = 75
 
-# Путь к папке с Beelight.exe и зависимостями
-BRIDGE_DIR = os.path.join(
-    os.path.dirname(__file__),
-    '..', '..', 'bridge', 'Beelight'
-)
 # Путь к директории Beelight (содержит Beelight.exe и все DLL зависимости)
 BEELIGHT_DIR = r"C:\Program Files (x86)\Beelight\Beelight V3.0"
 BEELIGHT_EXE = os.path.join(BEELIGHT_DIR, "Beelight.exe")

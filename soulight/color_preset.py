@@ -20,6 +20,11 @@ class ColorPreset:
         self.b = 255
         # Brightness (0-255)
         self.brightness = 255
+        # Последние сохранённые значения (для избежания лишних записей)
+        self._last_saved = None
+
+    def _snapshot(self):
+        return {"r": self.r, "g": self.g, "b": self.b, "brightness": self.brightness}
 
     def set_color(self, r, g, b):
         """Устанавливает цвет RGB."""
@@ -32,13 +37,11 @@ class ColorPreset:
         self.brightness = max(0, min(255, int(value)))
 
     def save(self):
-        """Сохраняет preset в JSON файл."""
-        data = {
-            "r": self.r,
-            "g": self.g,
-            "b": self.b,
-            "brightness": self.brightness
-        }
+        """Сохраняет preset в JSON файл только если значения изменились."""
+        data = self._snapshot()
+        if data == self._last_saved:
+            return
+        self._last_saved = data
         try:
             with open(CONFIG_FILE, "w") as f:
                 json.dump(data, f, indent=2)
@@ -48,6 +51,7 @@ class ColorPreset:
     def load(self):
         """Загружает preset из JSON файла."""
         if not os.path.exists(CONFIG_FILE):
+            self._last_saved = self._snapshot()
             return
 
         try:
@@ -57,8 +61,10 @@ class ColorPreset:
             self.g = data.get("g", 0)
             self.b = data.get("b", 255)
             self.brightness = data.get("brightness", 255)
+            self._last_saved = self._snapshot()
         except Exception as e:
             print(f"[ColorPreset] Ошибка загрузки: {e}")
+            self._last_saved = self._snapshot()
 
     def as_tuple(self):
         """Возвращает цвет как (r, g, b)."""

@@ -2,3 +2,6 @@ pythonnet>=3.0.5
 PyQt6>=6.6
 pyserial>=3.5
 mss>=9.0.1
+dxcam>=0.0.5
+numpy>=1.24
+soundcard>=0.4.4

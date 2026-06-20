@@ -99,17 +99,18 @@ class LEDConfig:
             else:
                 self.enabled[side] = old[:count]
 
-    def remaining(self, exclude_side=None):
-        """Сколько LED осталось до лимита MAX_LEDS (без учёта exclude_side)."""
+    def remaining(self, exclude_side=None, max_total: int = MAX_LEDS):
+        """Сколько LED осталось до лимита max_total (без учёта exclude_side)."""
         used = sum(c for s, c in self.counts.items() if s != exclude_side)
-        return MAX_LEDS - used
+        return max(0, max_total - used)
 
-    def set_count(self, side, count):
+    def set_count(self, side, count, max_total: int = MAX_LEDS):
         """
         Устанавливает количество LED на стороне.
-        Ограничивает сумму всех сторон до MAX_LEDS (75).
+        Ограничивает сумму всех сторон до max_total (по умолчанию MAX_LEDS).
+        max_total позволяет учитывать start_offset из UI.
         """
-        max_for_side = self.remaining(exclude_side=side)
+        max_for_side = self.remaining(exclude_side=side, max_total=max_total)
         self.counts[side] = max(0, min(int(count), max_for_side))
         self._rebuild_enabled()
 

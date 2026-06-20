@@ -4,9 +4,31 @@
 # Он пока не знает ничего про LED layout и отправку в контроллер.
 # Его задача простая: вернуть свежий кадр primary monitor в удобном виде.
 
+import ctypes
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Dict, Optional
+
+# Windows-only: COM-инициализация для DirectX/DXCam в worker thread.
+# DXCam использует comtypes/DirectX Desktop Duplication; без COM в потоке
+# создание camera может падать с COM-ошибками или возвращать None.
+# TODO: проверить с реальным dxcam в worker thread.
+_DXCAM_COM_THREAD = threading.local()
+
+
+def _init_dxcam_com():
+    if sys.platform != "win32":
+        return
+    if getattr(_DXCAM_COM_THREAD, "initialized", False):
+        return
+    try:
+        # 0 = COINIT_MULTITHREADED. DXCam/comtypes обычно работает с MTA.
+        ctypes.windll.ole32.CoInitializeEx(None, 0)
+        _DXCAM_COM_THREAD.initialized = True
+    except Exception:
+        pass
+
 
 # Пытаемся импортировать dxcam для быстрого DirectX capture.
 # Если его нет — fallback на mss (медленнее, но работает везде).
@@ -58,10 +80,11 @@ class ScreenCapturer:
         # В mss monitor[0] — это виртуальный общий desktop.
         # Для Ambilight нужен monitor[1+], то есть конкретный physical monitor.
         self._monitor_index = int(monitor_index)
-        # Persistent mss instance для экономии ~1.2ms per frame.
-        # Если возникнет ошибка — пересоздаём fresh и продолжаем.
+        # Persistent mss instance для экономии ~1-2ms per frame.
+        # Создаётся лениво в _get_sct() и живёт в том же потоке, что и используется.
         self._sct = None
-        self._mss_error_count = 0
+        # Счётчик ошибок capture нужен только для диагностики.
+        self._capture_errors = 0
         # DXCam camera instance для быстрого DirectX capture.
         # Создаётся лениво при первом вызове, если доступен.
         self._dxcam_camera = None
@@ -94,6 +117,18 @@ class ScreenCapturer:
             except Exception:
                 pass
             self._dxcam_camera = None
+
+    # Ленивый доступ к persistent mss instance.
+    # При первой ошибке сбрасываем и создаём заново.
+    def _get_sct(self):
+        import mss
+        if self._sct is None:
+            try:
+                self._sct = mss.mss()
+            except Exception as e:
+                self._debug_log("mss-init-error", f"{type(e).__name__}: {e}")
+                raise
+        return self._sct
 
     # Этот helper печатает компактные диагностические сообщения.
     # Он нужен для расследования редких mss/thread проблем без бесконечного spam.
@@ -133,19 +168,21 @@ class ScreenCapturer:
     # Этот метод делает один снимок экрана.
     # Возвращает numpy BGRA array для быстрого sampling.
     def capture(self) -> CaptureFrame:
-        import mss
         import numpy as np
 
         self._capture_attempts += 1
         try:
-            with mss.mss() as sct:
-                monitor = self._get_monitor(sct)
-                shot = sct.grab(monitor)
+            sct = self._get_sct()
+            monitor = self._get_monitor(sct)
+            shot = sct.grab(monitor)
         except Exception as e:
+            self._capture_errors += 1
             self._debug_log(
                 "capture-error",
-                f"attempt={self._capture_attempts} {type(e).__name__}: {e}",
+                f"attempt={self._capture_attempts} errors={self._capture_errors} {type(e).__name__}: {e}",
             )
+            # Сбрасываем persistent instance при ошибке — создадим заново при следующем вызове.
+            self._sct = None
             raise
         # np.array(shot) — mss ScreenShot поддерживает __array_interface__,
         # что позволяет numpy создать array напрямую без промежуточного bytes().
@@ -154,9 +191,10 @@ class ScreenCapturer:
                 (int(shot.height), int(shot.width), 4)
             )
         except Exception as e:
+            self._capture_errors += 1
             self._debug_log(
                 "convert-error",
-                f"attempt={self._capture_attempts} {type(e).__name__}: {e}",
+                f"attempt={self._capture_attempts} errors={self._capture_errors} {type(e).__name__}: {e}",
             )
             raise
         if self._capture_attempts <= 3:
@@ -194,59 +232,92 @@ class ScreenCapturer:
         import numpy as np
 
         self._capture_attempts += 1
-        
-        # Лениво создаём dxcam camera при первом вызове.
-        if self._dxcam_camera is None:
-            # device_idx=0 обычно primary monitor, но dxcam нумерует с 0.
-            # Наш monitor_index=1 для primary → device_idx=0 в dxcam.
-            device_idx = max(0, self._monitor_index - 1)
-            camera = dxcam.create(device_idx=device_idx, output_idx=device_idx)
-            if camera is None:
-                raise RuntimeError(f"Failed to create dxcam camera for device {device_idx}")
-            self._dxcam_camera = camera
-            self._debug_log("dxcam-init", f"device={device_idx}")
-        
-        # Получаем размер монитора из dxcam.
-        monitor_width = self._dxcam_camera.width
-        monitor_height = self._dxcam_camera.height
-        edge_depth = max(1, min(int(edge_depth), monitor_width, monitor_height))
-        
-        # Делаем один захват всего экрана. 
-        # DXCam возвращает RGB numpy array или None (если экран не изменился).
-        frame_rgb = self._dxcam_camera.grab()
-        
-        if frame_rgb is None:
-            # Экран не обновился. Используем кэш.
-            if self._last_dxcam_bgra is None:
-                # Еще нет ни одного кадра (например, сразу после старта). 
-                # Фолбэчимся на MSS временно, чтобы не падать.
-                return self._capture_edges_mss(edge_depth)
-            bgra = self._last_dxcam_bgra
-        else:
-            # Конвертируем RGB → BGRA для совместимости с sampler и сохраняем в кэш
-            bgra = self._rgb_to_bgra(frame_rgb)
-            self._last_dxcam_bgra = bgra
-            
-        # Нарезаем 4 edge regions отдельно (через быстрые numpy slices)
-        edge_regions = {
-            "top": CaptureRegion(
-                left=0, top=0, width=monitor_width, height=edge_depth, 
-                bgra=bgra[:edge_depth, :, :].copy()
-            ),
-            "bottom": CaptureRegion(
-                left=0, top=monitor_height - edge_depth, width=monitor_width, height=edge_depth, 
-                bgra=bgra[monitor_height - edge_depth:, :, :].copy()
-            ),
-            "left": CaptureRegion(
-                left=0, top=0, width=edge_depth, height=monitor_height, 
-                bgra=bgra[:, :edge_depth, :].copy()
-            ),
-            "right": CaptureRegion(
-                left=monitor_width - edge_depth, top=0, width=edge_depth, height=monitor_height, 
-                bgra=bgra[:, monitor_width - edge_depth:, :].copy()
-            ),
-        }
-        
+        device_idx = max(0, self._monitor_index - 1)
+
+        try:
+            # DXCam/comtypes требует COM в потоке. Инициализируем перед созданием camera.
+            _init_dxcam_com()
+
+            # Лениво создаём dxcam camera при первом вызове.
+            if self._dxcam_camera is None:
+                camera = dxcam.create(device_idx=device_idx, output_idx=device_idx)
+                if camera is None:
+                    raise RuntimeError(
+                        f"dxcam.create({device_idx},{device_idx}) returned None; "
+                        "Desktop Duplication недоступен для этого монитора/GPU."
+                    )
+                self._dxcam_camera = camera
+                self._debug_log(
+                    "dxcam-init",
+                    f"device={device_idx} size={camera.width}x{camera.height}",
+                )
+
+            # Получаем размер монитора из dxcam.
+            monitor_width = self._dxcam_camera.width
+            monitor_height = self._dxcam_camera.height
+            edge_depth = max(1, min(int(edge_depth), monitor_width, monitor_height))
+
+            # Делаем один захват всего экрана.
+            # DXCam возвращает RGB numpy array или None (если экран не изменился).
+            frame_rgb = self._dxcam_camera.grab()
+
+            if frame_rgb is None:
+                # Экран не обновился. Используем кэш.
+                if self._last_dxcam_bgra is None:
+                    # Еще нет ни одного кадра (например, сразу после старта).
+                    # Фолбэчимся на MSS временно, но НЕ отключаем dxcam.
+                    self._debug_log(
+                        "dxcam-first-frame-none",
+                        f"device={device_idx} first grab returned None, fallback to MSS once",
+                    )
+                    return self._capture_edges_mss(edge_depth)
+                bgra = self._last_dxcam_bgra
+            else:
+                # Конвертируем RGB → BGRA для совместимости с sampler и сохраняем в кэш
+                bgra = self._rgb_to_bgra(frame_rgb)
+                self._last_dxcam_bgra = bgra
+
+            # Нарезаем 4 edge regions отдельно (через быстрые numpy slices)
+            edge_regions = {
+                "top": CaptureRegion(
+                    left=0, top=0, width=monitor_width, height=edge_depth,
+                    bgra=bgra[:edge_depth, :, :].copy()
+                ),
+                "bottom": CaptureRegion(
+                    left=0, top=monitor_height - edge_depth, width=monitor_width, height=edge_depth,
+                    bgra=bgra[monitor_height - edge_depth:, :, :].copy()
+                ),
+                "left": CaptureRegion(
+                    left=0, top=0, width=edge_depth, height=monitor_height,
+                    bgra=bgra[:, :edge_depth, :].copy()
+                ),
+                "right": CaptureRegion(
+                    left=monitor_width - edge_depth, top=0, width=edge_depth, height=monitor_height,
+                    bgra=bgra[:, monitor_width - edge_depth:, :].copy()
+                ),
+            }
+
+        except Exception as e:
+            # Детальное логирование, чтобы понять реальную причину фейла.
+            import traceback
+            self._capture_errors += 1
+            self._debug_log(
+                "dxcam-error",
+                f"device={device_idx} errors={self._capture_errors} {type(e).__name__}: {e}",
+            )
+            # Выводим traceback только один раз, чтобы не зафлудить консоль.
+            if self._capture_errors <= 1:
+                traceback.print_exc()
+            # Не ставим _dxcam_failed = True здесь — оставляем решение на capture_edges,
+            # но ограничиваем число попыток, чтобы не бесконечно спамить ошибки.
+            if self._capture_errors >= 3:
+                self._dxcam_failed = True
+                self._debug_log(
+                    "dxcam-disabled",
+                    f"device={device_idx} disabled after {self._capture_errors} errors, fallback to MSS",
+                )
+            raise
+
         if self._capture_attempts <= 3:
             self._debug_log(
                 "dxcam-edge-capture",
@@ -255,7 +326,7 @@ class ScreenCapturer:
                     f"depth={edge_depth} (single grab + caching)"
                 ),
             )
-        
+
         return CaptureFrame(
             width=monitor_width,
             height=monitor_height,
@@ -264,23 +335,16 @@ class ScreenCapturer:
         )
 
     # MSS capture path — медленный GDI backend, но работает везде.
-    # Оптимизирован: reuse mss instance + single bounding box grab вместо 4 отдельных.
+    # Оптимизирован: reuse persistent mss instance + single bounding box grab.
     def _capture_edges_mss(self, edge_depth: int) -> CaptureFrame:
-        import mss
-        import numpy as np
-
         self._capture_attempts += 1
-        
-        # Создаём fresh mss instance каждый раз.
-        # Нет persistent state между кадрами — это избегает thread-local проблем.
-        sct = mss.mss()
         try:
+            sct = self._get_sct()
             return self._do_mss_capture_with_sct(sct, edge_depth)
-        finally:
-            try:
-                sct.close()
-            except Exception:
-                pass
+        except Exception:
+            # При ошибке сбрасываем persistent instance — следующий кадр создаст новый.
+            self._sct = None
+            raise
 
     # Внутренний helper для реального mss capture с переданным sct.
     def _do_mss_capture_with_sct(self, sct, edge_depth: int) -> CaptureFrame:
@@ -341,10 +405,10 @@ class ScreenCapturer:
                 ),
             }
         except Exception as e:
-            self._mss_error_count += 1
+            self._capture_errors += 1
             self._debug_log(
                 "mss-edge-capture-error",
-                f"attempt={self._capture_attempts} depth={edge_depth} errors={self._mss_error_count} {type(e).__name__}: {e}",
+                f"attempt={self._capture_attempts} depth={edge_depth} errors={self._capture_errors} {type(e).__name__}: {e}",
             )
             raise
 

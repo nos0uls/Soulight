@@ -18,6 +18,7 @@ from soulight.protocol.serial_driver import LEDDriver
 from soulight.ui.led_config_widget import LEDConfigPanel
 from soulight.color_preset import ColorPreset
 from soulight.screen_mirroring.layout import build_layout
+from soulight.screen_mirroring.screen_capture import DXCAM_AVAILABLE
 from soulight.screen_mirroring.worker import MirrorWorker
 from soulight.scenes.engine import SceneEngine
 from soulight.scenes.patterns import PATTERN_LABELS
@@ -610,6 +611,18 @@ class MainWindow(QMainWindow):
         self._mirror_fps_hint_label.setStyleSheet("color: #9399b2;")
         tuning_layout.addWidget(self._mirror_fps_hint_label)
 
+        # Backend selector — DXCam (быстрый DirectX) или MSS (совместимый GDI).
+        # Доступен только если dxcam установлен; иначе disabled и подсказка.
+        self._mirror_dxcam_checkbox = QCheckBox("Use DXCam backend")
+        self._mirror_dxcam_checkbox.setChecked(True)
+        self._mirror_dxcam_checkbox.setEnabled(DXCAM_AVAILABLE)
+        if not DXCAM_AVAILABLE:
+            self._mirror_dxcam_checkbox.setToolTip(
+                "dxcam not installed. Run: pip install dxcam"
+            )
+        self._mirror_dxcam_checkbox.stateChanged.connect(self._on_mirror_dxcam_changed)
+        tuning_layout.addWidget(self._mirror_dxcam_checkbox)
+
         layout.addWidget(tuning_group)
         # endregion
 
@@ -681,6 +694,12 @@ class MainWindow(QMainWindow):
     def _mirror_saturation_boost(self):
         """Текущее значение saturation boost (0.5..2.5)."""
         return self._mirror_sat_slider.value() / 100.0
+
+    def _mirror_prefer_dxcam(self):
+        """Пользователь выбрал DXCam backend?"""
+        if not DXCAM_AVAILABLE:
+            return False
+        return self._mirror_dxcam_checkbox.isChecked()
 
     def _mirror_interval_ms(self):
         """Интервал таймера mirroring по effective FPS после safe cap."""
@@ -799,6 +818,7 @@ class MainWindow(QMainWindow):
             "edge_fraction": self._mirror_edge_fraction(),
             "smoothing_factor": self._mirror_smoothing_factor(),
             "saturation_boost": self._mirror_saturation_boost(),
+            "prefer_dxcam": self._mirror_prefer_dxcam(),
         }
 
     def _restart_screen_mirroring(self):
@@ -948,6 +968,12 @@ class MainWindow(QMainWindow):
                 self._queue_mirror_restart()
             except Exception:
                 self._stop_screen_mirroring(restore_output=False)
+
+    def _on_mirror_dxcam_changed(self, state):
+        """При смене backend перезапускаем mirroring, чтобы применить выбор."""
+        if not self._screen_mirroring_active:
+            return
+        self._queue_mirror_restart()
 
     def _on_mirror_edge_changed(self):
         """Обновляет label и live-применяет edge depth в engine."""
@@ -1392,14 +1418,14 @@ class MainWindow(QMainWindow):
     # region Audio tab
 
     def _build_audio_tab(self, layout):
-        """Строит вкладку Audio: выбор режима, sensitivity, start/stop."""
+        """Строит вкладку Audio: source, mode, sensitivity, gain, color shift, fps, start/stop."""
         self._audio_status_label = QLabel("Idle")
         self._audio_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
         layout.addWidget(self._audio_status_label)
 
         mode_group = QGroupBox("Audio Settings")
         mode_layout = QVBoxLayout(mode_group)
-        
+
         # Audio Source
         source_row = QHBoxLayout()
         source_row.addWidget(QLabel("Source:"))
@@ -1408,7 +1434,7 @@ class MainWindow(QMainWindow):
         self._audio_source_combo.addItem("System Audio (Loopback)", True)
         source_row.addWidget(self._audio_source_combo)
         mode_layout.addLayout(source_row)
-        
+
         # Mode
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Mode:"))
@@ -1417,12 +1443,12 @@ class MainWindow(QMainWindow):
             self._audio_mode_combo.addItem(label, key)
         mode_row.addWidget(self._audio_mode_combo)
         mode_layout.addLayout(mode_row)
-        
+
         layout.addWidget(mode_group)
 
         sens_group = QGroupBox("Options")
         sens_layout = QVBoxLayout(sens_group)
-        
+
         # Sensitivity
         sens_row = QHBoxLayout()
         sens_row.addWidget(QLabel("Sensitivity:"))
@@ -1435,6 +1461,48 @@ class MainWindow(QMainWindow):
         self._audio_sens_label.setFixedWidth(40)
         sens_row.addWidget(self._audio_sens_label)
         sens_layout.addLayout(sens_row)
+
+        # Gain / Brightness
+        gain_row = QHBoxLayout()
+        gain_row.addWidget(QLabel("Gain:"))
+        self._audio_gain_slider = QSlider(Qt.Orientation.Horizontal)
+        self._audio_gain_slider.setRange(0, 300)
+        self._audio_gain_slider.setValue(100)
+        self._audio_gain_slider.setToolTip("Software brightness gain for audio effect")
+        self._audio_gain_label = QLabel("100%")
+        self._audio_gain_slider.valueChanged.connect(self._on_audio_gain_changed)
+        gain_row.addWidget(self._audio_gain_slider)
+        self._audio_gain_label.setFixedWidth(40)
+        gain_row.addWidget(self._audio_gain_label)
+        sens_layout.addLayout(gain_row)
+
+        # Color Shift
+        shift_row = QHBoxLayout()
+        shift_row.addWidget(QLabel("Color Shift:"))
+        self._audio_shift_slider = QSlider(Qt.Orientation.Horizontal)
+        self._audio_shift_slider.setRange(0, 100)
+        self._audio_shift_slider.setValue(0)
+        self._audio_shift_slider.setToolTip("Rotate base hue of audio modes")
+        self._audio_shift_label = QLabel("0%")
+        self._audio_shift_slider.valueChanged.connect(self._on_audio_shift_changed)
+        shift_row.addWidget(self._audio_shift_slider)
+        self._audio_shift_label.setFixedWidth(40)
+        shift_row.addWidget(self._audio_shift_label)
+        sens_layout.addLayout(shift_row)
+
+        # FPS
+        fps_row = QHBoxLayout()
+        fps_row.addWidget(QLabel("FPS:"))
+        self._audio_fps_slider = QSlider(Qt.Orientation.Horizontal)
+        self._audio_fps_slider.setRange(5, 60)
+        self._audio_fps_slider.setValue(20)
+        self._audio_fps_slider.setToolTip("Target frames per second")
+        self._audio_fps_label = QLabel("20")
+        self._audio_fps_slider.valueChanged.connect(self._on_audio_fps_changed)
+        fps_row.addWidget(self._audio_fps_slider)
+        self._audio_fps_label.setFixedWidth(40)
+        fps_row.addWidget(self._audio_fps_label)
+        sens_layout.addLayout(fps_row)
 
         # Full LED Checkbox
         self._audio_full_led_cb = QCheckBox("Full LED (Использовать все светодиоды)")
@@ -1469,19 +1537,46 @@ class MainWindow(QMainWindow):
         if self._audio_engine is not None:
             self._audio_engine.set_sensitivity(v / 100.0)
 
+    def _on_audio_gain_changed(self):
+        v = self._audio_gain_slider.value()
+        self._audio_gain_label.setText(f"{v}%")
+        if self._audio_engine is not None:
+            self._audio_engine.set_gain(v / 100.0)
+
+    def _on_audio_shift_changed(self):
+        v = self._audio_shift_slider.value()
+        self._audio_shift_label.setText(f"{v}%")
+        if self._audio_engine is not None:
+            self._audio_engine.set_color_shift(v / 100.0)
+
+    def _on_audio_fps_changed(self):
+        v = self._audio_fps_slider.value()
+        self._audio_fps_label.setText(str(v))
+        if self._audio_engine is not None:
+            self._audio_engine.set_fps(v)
+            self._update_audio_status_running()
+
     def _on_audio_start_clicked(self):
         if not self._driver.connected:
             QMessageBox.warning(self, "Not connected", "Connect to the controller first.")
             return
         self._start_audio(self._audio_mode_combo.currentData(), self._audio_source_combo.currentData())
 
+    def _update_audio_status_running(self):
+        if self._audio_active:
+            mode = self._audio_mode_combo.currentData()
+            fps = self._audio_fps_slider.value()
+            self._audio_status_label.setText(f"Running: {MODE_LABELS.get(mode, mode)} · {fps} FPS")
+            self._audio_status_label.setStyleSheet("color: #2d8c2d; font-weight: bold;")
+
     def _start_audio(self, mode_name: str, use_loopback: bool):
         self._stop_audio()
         self._audio_thread = QThread()
         # led_count берём из актуального LED конфига, а не хардкодим
         actual_led_count = self._led_config_panel.config.total
-        self._audio_engine = AudioEngine(led_count=actual_led_count, fps=20)
-        
+        fps = self._audio_fps_slider.value()
+        self._audio_engine = AudioEngine(led_count=actual_led_count, fps=fps)
+
         if not self._audio_full_led_cb.isChecked():
             from soulight.screen_mirroring.layout import build_layout
             layout_data = build_layout(self._led_config_panel.config, 100, 100, 0.08)
@@ -1495,6 +1590,8 @@ class MainWindow(QMainWindow):
         self._audio_thread.start()
         self._audio_active = True
         self._audio_engine.set_sensitivity(self._audio_sens_slider.value() / 100.0)
+        self._audio_engine.set_gain(self._audio_gain_slider.value() / 100.0)
+        self._audio_engine.set_color_shift(self._audio_shift_slider.value() / 100.0)
         self._audio_status_label.setText(f"Starting: {MODE_LABELS.get(mode_name, mode_name)}...")
         self._audio_status_label.setStyleSheet("color: #cc9933; font-weight: bold;")
         self._btn_audio_start.setEnabled(False)
@@ -1516,6 +1613,9 @@ class MainWindow(QMainWindow):
         self._btn_audio_stop.setEnabled(False)
 
     def _on_audio_frame_ready(self, colors):
+        # TODO: фактическая отправка per-LED цветов на ленту протестирована только
+        # логически. Без подключенного контроллера невозможно проверить, что цвета
+        # отображаются корректно и в правильном порядке.
         if self._audio_active and self._driver.connected:
             self._driver.set_per_led_colors(colors)
 
@@ -1525,7 +1625,16 @@ class MainWindow(QMainWindow):
         self._stop_audio()
 
     def _on_audio_status_changed(self, status):
-        self._audio_status_label.setText(status)
+        # "Running" / "Capturing..." / "Stopped" / "Error"
+        if status in ("Running", "Capturing..."):
+            # В обоих случаях показываем понятный Running-статус
+            self._update_audio_status_running()
+        elif status == "Stopped":
+            self._audio_status_label.setText("Idle")
+            self._audio_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
+        else:
+            # "Error" и другие — не перезаписываем сообщение об ошибке из _on_audio_error
+            self._audio_status_label.setText(status)
 
     # endregion
 
@@ -1534,7 +1643,7 @@ class MainWindow(QMainWindow):
     def _on_speed_mode_clicked(self, interval, label):
         for lb, btn in self._speed_buttons.items():
             btn.setChecked(lb == label)
-        self._driver._send_interval = interval
+        self._driver.set_send_interval(interval)
 
     # endregion
 

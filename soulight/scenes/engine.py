@@ -41,6 +41,7 @@ class SceneEngine(QObject):
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._layout_leds: Optional[list] = None
 
     @property
     def running(self) -> bool:
@@ -106,11 +107,11 @@ class SceneEngine(QObject):
                         self._pattern_params,
                     )
                     
-                    if hasattr(self, '_layout_leds') and self._layout_leds:
+                    if self._layout_leds:
                         for led in self._layout_leds:
                             if not led.enabled and led.logical_index < len(colors):
                                 colors[led.logical_index] = (0, 0, 0)
-                                
+
                     self.frame_ready.emit(colors)
                     self._frame_index += 1
                 except Exception as e:
