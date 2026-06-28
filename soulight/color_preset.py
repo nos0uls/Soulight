@@ -41,10 +41,10 @@ class ColorPreset:
         data = self._snapshot()
         if data == self._last_saved:
             return
-        self._last_saved = data
         try:
             with open(CONFIG_FILE, "w") as f:
                 json.dump(data, f, indent=2)
+            self._last_saved = data
         except Exception as e:
             print(f"[ColorPreset] Ошибка сохранения: {e}")
 

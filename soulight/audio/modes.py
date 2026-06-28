@@ -16,7 +16,13 @@ import numpy as np
 
 # Кэш для wave mode: интерполяционные координаты зависят только от
 # размеров magnitudes и led_count, которые не меняются в runtime.
+# Словарь может содержать только одну запись — последнюю.
 _WAVE_CACHE = {}
+
+
+def clear_wave_cache():
+    """Очищает кэш wave mode при смене параметров (block_size, led_count)."""
+    _WAVE_CACHE.clear()
 
 def _clamp(v: float) -> int:
     return max(0, min(255, int(v)))
@@ -152,7 +158,7 @@ def electronic(
     mid = _smooth(mid, "mid", params, 0.35)
     treble = _smooth(treble, "treble", params, 0.35)
 
-    pulse = _smooth(bass, "pulse", params, 0.25)
+    pulse = _smooth(bass, "elec_pulse", params, 0.25)
     colors = []
     for i in range(led_count):
         t = abs((i / max(1, led_count - 1)) - 0.5) * 2.0
@@ -269,9 +275,11 @@ def wave(
     # Кэшируем координаты интерполяции, так как mags.size и led_count постоянны.
     cache_key = (mags.size, led_count)
     if cache_key not in _WAVE_CACHE:
+        _WAVE_CACHE.clear()
+        log_x = np.logspace(0, 1, mags.size) / 10.0
         _WAVE_CACHE[cache_key] = (
-            np.linspace(0, 1, led_count),
-            np.logspace(0, 1, mags.size) / 10.0,
+            np.linspace(log_x[0], log_x[-1], led_count),
+            log_x,
         )
     xi, log_x = _WAVE_CACHE[cache_key]
     sampled = np.interp(xi, log_x, mags * sensitivity * gain)

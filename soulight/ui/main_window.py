@@ -18,7 +18,7 @@ from soulight.protocol.serial_driver import LEDDriver
 from soulight.ui.led_config_widget import LEDConfigPanel
 from soulight.color_preset import ColorPreset
 from soulight.screen_mirroring.layout import build_layout
-from soulight.screen_mirroring.screen_capture import DXCAM_AVAILABLE
+from soulight.screen_mirroring.screen_capture import BETTERCAM_AVAILABLE
 from soulight.screen_mirroring.worker import MirrorWorker
 from soulight.scenes.engine import SceneEngine
 from soulight.scenes.patterns import PATTERN_LABELS
@@ -285,6 +285,7 @@ class MainWindow(QMainWindow):
         self._audio_engine = None
         self._audio_active = False
         self._audio_thread = None
+        self._audio_error_msg = None
         # Этот флаг нужен, чтобы bulk-обновление слайдеров из пресета
         # не переводило preset selector в Custom посреди применения.
         self._applying_mirror_preset = False
@@ -611,17 +612,17 @@ class MainWindow(QMainWindow):
         self._mirror_fps_hint_label.setStyleSheet("color: #9399b2;")
         tuning_layout.addWidget(self._mirror_fps_hint_label)
 
-        # Backend selector — DXCam (быстрый DirectX) или MSS (совместимый GDI).
-        # Доступен только если dxcam установлен; иначе disabled и подсказка.
-        self._mirror_dxcam_checkbox = QCheckBox("Use DXCam backend")
-        self._mirror_dxcam_checkbox.setChecked(True)
-        self._mirror_dxcam_checkbox.setEnabled(DXCAM_AVAILABLE)
-        if not DXCAM_AVAILABLE:
-            self._mirror_dxcam_checkbox.setToolTip(
-                "dxcam not installed. Run: pip install dxcam"
+        # Backend selector — BetterCam (быстрый DirectX) или MSS (совместимый GDI).
+        # Доступен только если bettercam установлен; иначе disabled и подсказка.
+        self._mirror_bettercam_checkbox = QCheckBox("Use BetterCam backend")
+        self._mirror_bettercam_checkbox.setChecked(True)
+        self._mirror_bettercam_checkbox.setEnabled(BETTERCAM_AVAILABLE)
+        if not BETTERCAM_AVAILABLE:
+            self._mirror_bettercam_checkbox.setToolTip(
+                "bettercam not installed. Run: pip install bettercam"
             )
-        self._mirror_dxcam_checkbox.stateChanged.connect(self._on_mirror_dxcam_changed)
-        tuning_layout.addWidget(self._mirror_dxcam_checkbox)
+        self._mirror_bettercam_checkbox.stateChanged.connect(self._on_mirror_bettercam_changed)
+        tuning_layout.addWidget(self._mirror_bettercam_checkbox)
 
         layout.addWidget(tuning_group)
         # endregion
@@ -695,11 +696,11 @@ class MainWindow(QMainWindow):
         """Текущее значение saturation boost (0.5..2.5)."""
         return self._mirror_sat_slider.value() / 100.0
 
-    def _mirror_prefer_dxcam(self):
-        """Пользователь выбрал DXCam backend?"""
-        if not DXCAM_AVAILABLE:
+    def _mirror_prefer_bettercam(self):
+        """Пользователь выбрал BetterCam backend?"""
+        if not BETTERCAM_AVAILABLE:
             return False
-        return self._mirror_dxcam_checkbox.isChecked()
+        return self._mirror_bettercam_checkbox.isChecked()
 
     def _mirror_interval_ms(self):
         """Интервал таймера mirroring по effective FPS после safe cap."""
@@ -818,7 +819,7 @@ class MainWindow(QMainWindow):
             "edge_fraction": self._mirror_edge_fraction(),
             "smoothing_factor": self._mirror_smoothing_factor(),
             "saturation_boost": self._mirror_saturation_boost(),
-            "prefer_dxcam": self._mirror_prefer_dxcam(),
+            "prefer_dxcam": self._mirror_prefer_bettercam(),
         }
 
     def _restart_screen_mirroring(self):
@@ -969,7 +970,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 self._stop_screen_mirroring(restore_output=False)
 
-    def _on_mirror_dxcam_changed(self, state):
+    def _on_mirror_bettercam_changed(self, state):
         """При смене backend перезапускаем mirroring, чтобы применить выбор."""
         if not self._screen_mirroring_active:
             return
@@ -1607,8 +1608,9 @@ class MainWindow(QMainWindow):
             self._audio_thread.wait(2000)
             self._audio_thread = None
         self._audio_active = False
-        self._audio_status_label.setText("Idle")
-        self._audio_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
+        if not getattr(self, "_audio_error_msg", None):
+            self._audio_status_label.setText("Idle")
+            self._audio_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
         self._btn_audio_start.setEnabled(True)
         self._btn_audio_stop.setEnabled(False)
 
@@ -1620,20 +1622,27 @@ class MainWindow(QMainWindow):
             self._driver.set_per_led_colors(colors)
 
     def _on_audio_error(self, msg):
-        self._audio_status_label.setText(f"Error: {msg}")
+        self._audio_error_msg = f"Error: {msg}"
+        self._audio_status_label.setText(self._audio_error_msg)
         self._audio_status_label.setStyleSheet("color: #f38ba8; font-weight: bold;")
         self._stop_audio()
+        # Восстанавливаем сообщение после _stop_audio, который ставит "Idle"
+        self._audio_status_label.setText(self._audio_error_msg)
+        self._audio_status_label.setStyleSheet("color: #f38ba8; font-weight: bold;")
 
     def _on_audio_status_changed(self, status):
         # "Running" / "Capturing..." / "Stopped" / "Error"
         if status in ("Running", "Capturing..."):
-            # В обоих случаях показываем понятный Running-статус
+            self._audio_error_msg = None
             self._update_audio_status_running()
         elif status == "Stopped":
+            if getattr(self, "_audio_error_msg", None):
+                return  # Не перезаписываем сообщение об ошибке
             self._audio_status_label.setText("Idle")
             self._audio_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
+        elif status == "Error":
+            pass  # Сообщение уже установлено _on_audio_error
         else:
-            # "Error" и другие — не перезаписываем сообщение об ошибке из _on_audio_error
             self._audio_status_label.setText(status)
 
     # endregion

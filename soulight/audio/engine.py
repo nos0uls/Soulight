@@ -160,7 +160,7 @@ class AudioEngine(QObject):
         # Проверено на схожем проекте (NoVoice): после CoInitializeEx
         # WASAPI открывается корректно в worker thread.
         # TODO: протестировать с реальным loopback-устройством и LED.
-        _init_com_for_thread()
+        com_owned = _init_com_for_thread()
         self.status_changed.emit("Capturing...")
         try:
             if self._use_loopback:
@@ -208,4 +208,5 @@ class AudioEngine(QObject):
             self.status_changed.emit("Error")
             self._running = False
         finally:
-            _uninit_com_for_thread()
+            if com_owned:
+                _uninit_com_for_thread()

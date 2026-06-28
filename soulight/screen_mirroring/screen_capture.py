@@ -5,38 +5,78 @@
 # Его задача простая: вернуть свежий кадр primary monitor в удобном виде.
 
 import ctypes
+import os
 import sys
 import threading
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-# Windows-only: COM-инициализация для DirectX/DXCam в worker thread.
-# DXCam использует comtypes/DirectX Desktop Duplication; без COM в потоке
+# Windows-only: DPI awareness нужен для bettercam, чтобы получать реальное
+# разрешение монитора (1920x1080 вместо 1536x864 при 125% scaling).
+if sys.platform == "win32":
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        pass
+
+# Windows-only: COM-инициализация для bettercam в worker thread.
+# bettercam использует comtypes/DirectX Desktop Duplication; без COM в потоке
 # создание camera может падать с COM-ошибками или возвращать None.
-# TODO: проверить с реальным dxcam в worker thread.
-_DXCAM_COM_THREAD = threading.local()
+# ВАЖНО: нужно использовать comtypes.CoInitialize(), а не raw CoInitializeEx,
+# иначе comtypes не отследит COM state и srcdc в threading.local будет отсутствовать.
+_BETTERCAM_COM_THREAD = threading.local()
 
 
-def _init_dxcam_com():
+def _init_bettercam_com():
     if sys.platform != "win32":
         return
-    if getattr(_DXCAM_COM_THREAD, "initialized", False):
+    if getattr(_BETTERCAM_COM_THREAD, "initialized", False):
         return
     try:
-        # 0 = COINIT_MULTITHREADED. DXCam/comtypes обычно работает с MTA.
-        ctypes.windll.ole32.CoInitializeEx(None, 0)
-        _DXCAM_COM_THREAD.initialized = True
+        import comtypes
+        comtypes.CoInitialize()
+        _BETTERCAM_COM_THREAD.initialized = True
+    except Exception as e:
+        print(f"[BetterCam-COM] CoInitialize FAILED: {type(e).__name__}: {e}")
+        raise
+
+
+def _ensure_gpu_preference():
+    """На hybrid-системах (NVIDIA Optimus) Desktop Duplication API работает
+    только на iGPU (Intel). Устанавливаем GpuPreference=1 (Power Saving)
+    для текущего python.exe, если ещё не установлен."""
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+        exe = sys.executable
+        key_path = r"Software\Microsoft\DirectX\UserGpuPreferences"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ) as key:
+            try:
+                value, _ = winreg.QueryValueEx(key, exe)
+                if "GpuPreference=1" in value:
+                    return
+            except FileNotFoundError:
+                pass
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_WRITE) as key:
+            winreg.SetValueEx(key, exe, 0, winreg.REG_SZ, "GpuPreference=1;")
+        print(f"[BetterCam] Set GpuPreference=1 (Intel iGPU) for {exe}")
+        print("[BetterCam] Restart required for GPU preference to take effect.")
     except Exception:
         pass
 
 
-# Пытаемся импортировать dxcam для быстрого DirectX capture.
+# Пытаемся импортировать bettercam для быстрого DirectX capture.
 # Если его нет — fallback на mss (медленнее, но работает везде).
 try:
-    import dxcam
-    DXCAM_AVAILABLE = True
+    import bettercam
+    BETTERCAM_AVAILABLE = True
+    _ensure_gpu_preference()
 except ImportError:
-    DXCAM_AVAILABLE = False
+    BETTERCAM_AVAILABLE = False
+
+# Обратная совместимость: DXCAM_AVAILABLE для внешних проверок.
+DXCAM_AVAILABLE = BETTERCAM_AVAILABLE
 
 
 # Этот dataclass хранит уже готовый кадр экрана.
@@ -73,7 +113,7 @@ class MonitorGeometry:
 
 
 # Этот класс отвечает только за захват экрана.
-# Он автоматически выбирает лучший backend: dxcam (быстро) или mss (fallback).
+# Он автоматически выбирает лучший backend: bettercam (быстро) или mss (fallback).
 # Orchestration (таймеры, потоки) живёт снаружи.
 class ScreenCapturer:
     def __init__(self, monitor_index: int = 1, prefer_dxcam: bool = False):
@@ -87,10 +127,10 @@ class ScreenCapturer:
         self._capture_errors = 0
         # DXCam camera instance для быстрого DirectX capture.
         # Создаётся лениво при первом вызове, если доступен.
-        self._dxcam_camera = None
-        self._last_dxcam_bgra = None
-        self._use_dxcam = DXCAM_AVAILABLE and prefer_dxcam
-        self._dxcam_failed = False
+        self._bettercam_camera = None
+        self._last_bettercam_bgra = None
+        self._use_bettercam = BETTERCAM_AVAILABLE and prefer_dxcam
+        self._bettercam_failed = False
         # Эти счётчики нужны только для диагностики.
         # Мы логируем первые удачные вызовы и любые ошибки,
         # чтобы потом было проще понять, где ломается capture lifecycle.
@@ -110,13 +150,21 @@ class ScreenCapturer:
             except Exception:
                 pass
             self._sct = None
-        # Освобождаем dxcam camera если был создан.
-        if self._dxcam_camera is not None:
+        # Освобождаем bettercam camera если был создан.
+        if self._bettercam_camera is not None:
             try:
-                self._dxcam_camera.release()
+                self._bettercam_camera.release()
             except Exception:
                 pass
-            self._dxcam_camera = None
+            self._bettercam_camera = None
+        # Деинициализируем COM для bettercam, если был инициализирован в этом потоке.
+        if getattr(_BETTERCAM_COM_THREAD, "initialized", False):
+            try:
+                import comtypes
+                comtypes.CoUninitialize()
+                _BETTERCAM_COM_THREAD.initialized = False
+            except Exception:
+                pass
 
     # Ленивый доступ к persistent mss instance.
     # При первой ошибке сбрасываем и создаём заново.
@@ -140,18 +188,17 @@ class ScreenCapturer:
 
     # Этот метод возвращает реальную геометрию выбранного монитора.
     def get_monitor_geometry(self) -> MonitorGeometry:
-        import mss
-        # Геометрию тоже читаем через временный mss(), чтобы lifecycle capture backend
-        # был полностью локален одному вызову и не переносился между кадрами/потоками.
+        # Используем persistent mss instance для консистентности с capture path.
         self._geometry_reads += 1
         try:
-            with mss.mss() as temp_sct:
-                monitor = self._get_monitor(temp_sct)
+            sct = self._get_sct()
+            monitor = self._get_monitor(sct)
         except Exception as e:
             self._debug_log(
                 "geometry-error",
                 f"attempt={self._geometry_reads} {type(e).__name__}: {e}",
             )
+            self._sct = None
             raise
         if self._geometry_reads <= 3:
             self._debug_log(
@@ -211,71 +258,78 @@ class ScreenCapturer:
     # Этот метод захватывает только нужные полосы по краям экрана.
     # Так мы резко уменьшаем объём пикселей, которые вообще попадают в numpy.
     def capture_edges(self, edge_depth: int) -> CaptureFrame:
-        # Пытаемся использовать dxcam если доступен и не было ошибок.
-        if self._use_dxcam and not self._dxcam_failed:
+        # Пытаемся использовать bettercam если доступен и не было ошибок.
+        if self._use_bettercam and not self._bettercam_failed:
             try:
-                return self._capture_edges_dxcam(edge_depth)
+                return self._capture_edges_bettercam(edge_depth)
             except Exception as e:
                 self._debug_log(
-                    "dxcam-fallback",
-                    f"DXCam failed, falling back to mss: {type(e).__name__}: {e}",
+                    "bettercam-fallback",
+                    f"BetterCam failed, falling back to mss: {type(e).__name__}: {e}",
                 )
-                self._dxcam_failed = True
-                # Fallback на mss
+                # Но сбрасываем MSS instance, если COM был инициализирован —
+                # comtypes.CoInitialize мог сломать persistent MSS state (srcdc).
+                if getattr(_BETTERCAM_COM_THREAD, "initialized", False):
+                    if self._sct is not None:
+                        try:
+                            self._sct.close()
+                        except Exception:
+                            pass
+                        self._sct = None
         
         # MSS fallback path
         return self._capture_edges_mss(edge_depth)
 
-    # DXCam capture path — использует DirectX Desktop Duplication API.
+    # BetterCam capture path — использует DirectX Desktop Duplication API.
     # В 10-20x быстрее mss благодаря прямому доступу к GPU framebuffer.
-    def _capture_edges_dxcam(self, edge_depth: int) -> CaptureFrame:
+    def _capture_edges_bettercam(self, edge_depth: int) -> CaptureFrame:
         import numpy as np
 
         self._capture_attempts += 1
         device_idx = max(0, self._monitor_index - 1)
 
         try:
-            # DXCam/comtypes требует COM в потоке. Инициализируем перед созданием camera.
-            _init_dxcam_com()
+            # bettercam/comtypes требует COM в потоке. Инициализируем перед созданием camera.
+            _init_bettercam_com()
 
-            # Лениво создаём dxcam camera при первом вызове.
-            if self._dxcam_camera is None:
-                camera = dxcam.create(device_idx=device_idx, output_idx=device_idx)
+            # Лениво создаём bettercam camera при первом вызове.
+            if self._bettercam_camera is None:
+                camera = bettercam.create(device_idx=device_idx, output_idx=device_idx)
                 if camera is None:
                     raise RuntimeError(
-                        f"dxcam.create({device_idx},{device_idx}) returned None; "
+                        f"bettercam.create({device_idx},{device_idx}) returned None; "
                         "Desktop Duplication недоступен для этого монитора/GPU."
                     )
-                self._dxcam_camera = camera
+                self._bettercam_camera = camera
                 self._debug_log(
-                    "dxcam-init",
+                    "bettercam-init",
                     f"device={device_idx} size={camera.width}x{camera.height}",
                 )
 
-            # Получаем размер монитора из dxcam.
-            monitor_width = self._dxcam_camera.width
-            monitor_height = self._dxcam_camera.height
+            # Получаем размер монитора из bettercam.
+            monitor_width = self._bettercam_camera.width
+            monitor_height = self._bettercam_camera.height
             edge_depth = max(1, min(int(edge_depth), monitor_width, monitor_height))
 
             # Делаем один захват всего экрана.
-            # DXCam возвращает RGB numpy array или None (если экран не изменился).
-            frame_rgb = self._dxcam_camera.grab()
+            # BetterCam возвращает RGB numpy array или None (если экран не изменился).
+            frame_rgb = self._bettercam_camera.grab()
 
             if frame_rgb is None:
                 # Экран не обновился. Используем кэш.
-                if self._last_dxcam_bgra is None:
+                if self._last_bettercam_bgra is None:
                     # Еще нет ни одного кадра (например, сразу после старта).
                     # Фолбэчимся на MSS временно, но НЕ отключаем dxcam.
                     self._debug_log(
-                        "dxcam-first-frame-none",
+                        "bettercam-first-frame-none",
                         f"device={device_idx} first grab returned None, fallback to MSS once",
                     )
                     return self._capture_edges_mss(edge_depth)
-                bgra = self._last_dxcam_bgra
+                bgra = self._last_bettercam_bgra
             else:
                 # Конвертируем RGB → BGRA для совместимости с sampler и сохраняем в кэш
                 bgra = self._rgb_to_bgra(frame_rgb)
-                self._last_dxcam_bgra = bgra
+                self._last_bettercam_bgra = bgra
 
             # Нарезаем 4 edge regions отдельно (через быстрые numpy slices)
             edge_regions = {
@@ -302,25 +356,37 @@ class ScreenCapturer:
             import traceback
             self._capture_errors += 1
             self._debug_log(
-                "dxcam-error",
+                "bettercam-error",
                 f"device={device_idx} errors={self._capture_errors} {type(e).__name__}: {e}",
             )
-            # Выводим traceback только один раз, чтобы не зафлудить консоль.
             if self._capture_errors <= 1:
                 traceback.print_exc()
-            # Не ставим _dxcam_failed = True здесь — оставляем решение на capture_edges,
-            # но ограничиваем число попыток, чтобы не бесконечно спамить ошибки.
             if self._capture_errors >= 3:
-                self._dxcam_failed = True
+                self._bettercam_failed = True
                 self._debug_log(
-                    "dxcam-disabled",
+                    "bettercam-disabled",
                     f"device={device_idx} disabled after {self._capture_errors} errors, fallback to MSS",
                 )
+                if getattr(_BETTERCAM_COM_THREAD, "initialized", False):
+                    try:
+                        import comtypes
+                        comtypes.CoUninitialize()
+                        _BETTERCAM_COM_THREAD.initialized = False
+                        self._debug_log("bettercam-com-uninit", "CoUninitialize after disable")
+                    except Exception:
+                        pass
+                if self._sct is not None:
+                    try:
+                        self._sct.close()
+                    except Exception:
+                        pass
+                    self._sct = None
+                    self._debug_log("mss-reset", "persistent mss reset after BetterCam COM uninit")
             raise
 
         if self._capture_attempts <= 3:
             self._debug_log(
-                "dxcam-edge-capture",
+                "bettercam-edge-capture",
                 (
                     f"attempt={self._capture_attempts} full={monitor_width}x{monitor_height} "
                     f"depth={edge_depth} (single grab + caching)"

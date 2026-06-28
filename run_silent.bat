@@ -17,7 +17,7 @@ if %errorlevel% == 0 (
     if %errorlevel% == 0 (
         pyw -3.12 -m soulight
     ) else (
-        start "" pythonw -m soulight
+        start "" python -m soulight
     )
 )
 
