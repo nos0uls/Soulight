@@ -80,13 +80,13 @@ DXCAM_AVAILABLE = BETTERCAM_AVAILABLE
 
 
 # Этот dataclass хранит уже готовый кадр экрана.
-# bgra — numpy array shape (H, W, 4) dtype=uint8, порядок каналов BGRA.
+# rgb — numpy array shape (H, W, 3) dtype=uint8, порядок каналов RGB.
 # numpy позволяет делать быстрое среднее по зонам без Python-циклов.
 @dataclass
 class CaptureFrame:
     width: int
     height: int
-    bgra: Optional[object] = None  # np.ndarray (H, W, 4) uint8
+    rgb: Optional[object] = None  # np.ndarray (H, W, 3) uint8
     edge_regions: Optional[Dict[str, "CaptureRegion"]] = None
 
 
@@ -99,7 +99,7 @@ class CaptureRegion:
     top: int
     width: int
     height: int
-    bgra: object  # np.ndarray (H, W, 4) uint8
+    rgb: object  # np.ndarray (H, W, 3) uint8
 
 
 # Этот dataclass хранит геометрию выбранного монитора.
@@ -128,7 +128,8 @@ class ScreenCapturer:
         # DXCam camera instance для быстрого DirectX capture.
         # Создаётся лениво при первом вызове, если доступен.
         self._bettercam_camera = None
-        self._last_bettercam_bgra = None
+        self._last_bettercam_rgb = None
+        self._last_edge_regions = None
         self._use_bettercam = BETTERCAM_AVAILABLE and prefer_dxcam
         self._bettercam_failed = False
         # Эти счётчики нужны только для диагностики.
@@ -213,7 +214,7 @@ class ScreenCapturer:
         )
 
     # Этот метод делает один снимок экрана.
-    # Возвращает numpy BGRA array для быстрого sampling.
+    # Возвращает numpy RGB array для быстрого sampling.
     def capture(self) -> CaptureFrame:
         import numpy as np
 
@@ -237,6 +238,7 @@ class ScreenCapturer:
             bgra = np.array(shot, dtype=np.uint8).reshape(
                 (int(shot.height), int(shot.width), 4)
             )
+            rgb = bgra[:, :, :3][:, :, ::-1].copy()  # BGRA → RGB
         except Exception as e:
             self._capture_errors += 1
             self._debug_log(
@@ -252,7 +254,7 @@ class ScreenCapturer:
         return CaptureFrame(
             width=int(shot.width),
             height=int(shot.height),
-            bgra=bgra,
+            rgb=rgb,
         )
 
     # Этот метод захватывает только нужные полосы по краям экрана.
@@ -292,6 +294,15 @@ class ScreenCapturer:
             # bettercam/comtypes требует COM в потоке. Инициализируем перед созданием camera.
             _init_bettercam_com()
 
+            # Сбрасываем persistent MSS instance — он мог быть создан до CoInitialize
+            # (например, в get_geometry), и его srcdc больше не валиден после смены COM state.
+            if self._sct is not None:
+                try:
+                    self._sct.close()
+                except Exception:
+                    pass
+                self._sct = None
+
             # Лениво создаём bettercam camera при первом вызове.
             if self._bettercam_camera is None:
                 camera = bettercam.create(device_idx=device_idx, output_idx=device_idx)
@@ -316,40 +327,35 @@ class ScreenCapturer:
             frame_rgb = self._bettercam_camera.grab()
 
             if frame_rgb is None:
-                # Экран не обновился. Используем кэш.
-                if self._last_bettercam_bgra is None:
-                    # Еще нет ни одного кадра (например, сразу после старта).
-                    # Фолбэчимся на MSS временно, но НЕ отключаем dxcam.
-                    self._debug_log(
-                        "bettercam-first-frame-none",
-                        f"device={device_idx} first grab returned None, fallback to MSS once",
-                    )
+                # Экран не обновился. Используем кэш edge_regions.
+                if self._last_edge_regions is None:
+                    # Ещё нет ни одного кадра — fallback на MSS.
                     return self._capture_edges_mss(edge_depth)
-                bgra = self._last_bettercam_bgra
+                edge_regions = self._last_edge_regions
             else:
-                # Конвертируем RGB → BGRA для совместимости с sampler и сохраняем в кэш
-                bgra = self._rgb_to_bgra(frame_rgb)
-                self._last_bettercam_bgra = bgra
-
-            # Нарезаем 4 edge regions отдельно (через быстрые numpy slices)
-            edge_regions = {
-                "top": CaptureRegion(
-                    left=0, top=0, width=monitor_width, height=edge_depth,
-                    bgra=bgra[:edge_depth, :, :].copy()
-                ),
-                "bottom": CaptureRegion(
-                    left=0, top=monitor_height - edge_depth, width=monitor_width, height=edge_depth,
-                    bgra=bgra[monitor_height - edge_depth:, :, :].copy()
-                ),
-                "left": CaptureRegion(
-                    left=0, top=0, width=edge_depth, height=monitor_height,
-                    bgra=bgra[:, :edge_depth, :].copy()
-                ),
-                "right": CaptureRegion(
-                    left=monitor_width - edge_depth, top=0, width=edge_depth, height=monitor_height,
-                    bgra=bgra[:, monitor_width - edge_depth:, :].copy()
-                ),
-            }
+                # Нарезаем 4 edge regions через numpy slices (view, без .copy()).
+                # frame_rgb — view на shared memory; .copy() не нужен т.к. next grab
+                # вернёт новый array, а этот останется в кэше до следующего изменения.
+                rgb = np.ascontiguousarray(frame_rgb)
+                edge_regions = {
+                    "top": CaptureRegion(
+                        left=0, top=0, width=monitor_width, height=edge_depth,
+                        rgb=rgb[:edge_depth, :, :]
+                    ),
+                    "bottom": CaptureRegion(
+                        left=0, top=monitor_height - edge_depth, width=monitor_width, height=edge_depth,
+                        rgb=rgb[monitor_height - edge_depth:, :, :]
+                    ),
+                    "left": CaptureRegion(
+                        left=0, top=0, width=edge_depth, height=monitor_height,
+                        rgb=rgb[:, :edge_depth, :]
+                    ),
+                    "right": CaptureRegion(
+                        left=monitor_width - edge_depth, top=0, width=edge_depth, height=monitor_height,
+                        rgb=rgb[:, monitor_width - edge_depth:, :]
+                    ),
+                }
+                self._last_edge_regions = edge_regions
 
         except Exception as e:
             # Детальное логирование, чтобы понять реальную причину фейла.
@@ -396,7 +402,7 @@ class ScreenCapturer:
         return CaptureFrame(
             width=monitor_width,
             height=monitor_height,
-            bgra=None,
+            rgb=None,
             edge_regions=edge_regions,
         )
 
@@ -425,7 +431,6 @@ class ScreenCapturer:
             edge_depth = max(1, min(int(edge_depth), monitor_width, monitor_height))
 
             # Захватываем один большой bounding box, покрывающий все 4 края.
-            # Это один syscall вместо 4, что экономит ~15-20ms.
             full_box = {
                 "left": monitor_left,
                 "top": monitor_top,
@@ -434,40 +439,41 @@ class ScreenCapturer:
             }
             shot = sct.grab(full_box)
             # Конвертируем весь кадр в numpy один раз.
+            # MSS возвращает BGRA, конвертируем в RGB для единого pipeline.
             full_bgra = np.array(shot, dtype=np.uint8).reshape(
                 (int(shot.height), int(shot.width), 4)
             )
+            full_rgb = full_bgra[:, :, :3][:, :, ::-1].copy()  # BGRA → RGB
             
-            # Теперь нарезаем edge strips из уже захваченного full frame.
-            # Это быстрые numpy slices без дополнительных syscalls.
+            # Нарезаем edge strips из уже захваченного full frame.
             edge_regions = {
                 "top": CaptureRegion(
                     left=0,
                     top=0,
                     width=monitor_width,
                     height=edge_depth,
-                    bgra=full_bgra[:edge_depth, :, :].copy(),
+                    rgb=full_rgb[:edge_depth, :, :],
                 ),
                 "bottom": CaptureRegion(
                     left=0,
                     top=monitor_height - edge_depth,
                     width=monitor_width,
                     height=edge_depth,
-                    bgra=full_bgra[monitor_height - edge_depth:, :, :].copy(),
+                    rgb=full_rgb[monitor_height - edge_depth:, :, :],
                 ),
                 "left": CaptureRegion(
                     left=0,
                     top=0,
                     width=edge_depth,
                     height=monitor_height,
-                    bgra=full_bgra[:, :edge_depth, :].copy(),
+                    rgb=full_rgb[:, :edge_depth, :],
                 ),
                 "right": CaptureRegion(
                     left=monitor_width - edge_depth,
                     top=0,
                     width=edge_depth,
                     height=monitor_height,
-                    bgra=full_bgra[:, monitor_width - edge_depth:, :].copy(),
+                    rgb=full_rgb[:, monitor_width - edge_depth:, :],
                 ),
             }
         except Exception as e:
@@ -490,7 +496,7 @@ class ScreenCapturer:
         return CaptureFrame(
             width=monitor_width,
             height=monitor_height,
-            bgra=None,
+            rgb=None,
             edge_regions=edge_regions,
         )
 
@@ -504,15 +510,3 @@ class ScreenCapturer:
             )
         return monitors[self._monitor_index]
 
-    # Конвертирует RGB numpy array в BGRA для совместимости с sampler.
-    # DXCam возвращает RGB, а наш sampler ожидает BGRA.
-    @staticmethod
-    def _rgb_to_bgra(rgb_array):
-        import numpy as np
-        h, w, _ = rgb_array.shape
-        bgra = np.zeros((h, w, 4), dtype=np.uint8)
-        bgra[:, :, 0] = rgb_array[:, :, 2]  # B
-        bgra[:, :, 1] = rgb_array[:, :, 1]  # G
-        bgra[:, :, 2] = rgb_array[:, :, 0]  # R
-        bgra[:, :, 3] = 255  # A
-        return bgra
