@@ -230,9 +230,7 @@ class NativeBridgeTests(unittest.TestCase):
     def test_color_packet_decodes(self):
         wire = self.b.make_color_packet(200, 100, 50)
         data = lp.decrypt_payload(wire[5:])
-        led = data[8:]
-        self.assertEqual(len(led), 225)
-        self.assertEqual(set(led), {200, 100, 50})
+        self.assertEqual(data, b"\x00\x05\x04\xff\x03\x00" + bytes([200, 100, 50]))
 
     def test_brightness_is_hardware_packet(self):
         """Яркость — настоящий wire-пакет (ctrl=2), НЕ software-скейлинг RGB."""
@@ -245,7 +243,7 @@ class NativeBridgeTests(unittest.TestCase):
         """Регрессия: после make_bright_packet цвет остаётся без software-скейлинга
         (dimmer применяет сам контроллер)."""
         self.b.make_bright_packet(0)
-        wire = self.b.make_color_packet(255, 255, 255)
+        wire = self.b.make_rgb_transfer_packet([(255, 255, 255)] * 75)
         data = lp.decrypt_payload(wire[5:])
         self.assertEqual(set(data[8:]), {255})
 

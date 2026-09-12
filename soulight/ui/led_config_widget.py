@@ -9,12 +9,11 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QSpinBox, QGroupBox, QGridLayout,
-    QComboBox, QCheckBox, QSizePolicy, QFrame,
+    QComboBox, QCheckBox, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal
 from PyQt6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QFont,
-    QLinearGradient, QPainterPath,
+    QPainter, QColor, QPen, QFont, QPainterPath,
 )
 
 from soulight.led_config import (

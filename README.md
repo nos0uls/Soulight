@@ -29,6 +29,35 @@ cksum = sum(body[1:]) & 0xFF;  key случаен;  pad = 3..10
 native если нет pythonnet+Beelight.exe). Порт: `SOULIGHT_PORT` или
 автодетект (`ttyUSB*`/`ttyACM*` на Linux, `COM7` на Windows).
 
+## Headless / автозапуск
+
+GUI не нужен — Qt вообще не импортируется (работает на systemd/SSH без X):
+
+```bash
+python -m soulight --headless --mode color --color FF3300 --brightness 128
+python -m soulight --headless --mode scene --pattern fire --fps 25 --speed 1.5
+python -m soulight --headless --mode audio --audio-mode spectrum --device <id>
+python -m soulight --headless --list-devices     # id устройств вывода/ввода
+python -m soulight --headless --mode off
+```
+
+Connect повторяется каждые 3с, пока контроллер не появится (флаг
+`--no-retry` отключает). systemd unit:
+
+```ini
+[Unit]
+Description=Soulight LED
+After=dev-ttyACM0.device
+
+[Service]
+ExecStart=/path/.venv/bin/python -m soulight --headless --mode scene --pattern aurora
+WorkingDirectory=/path/Soulight
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ## Примечания
 
 - Контроллер просыпается по DTR+RTS; на Linux нужен доступ к порту

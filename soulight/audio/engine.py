@@ -112,8 +112,9 @@ class AudioEngine(QObject):
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
-        # FFT bins
+        # FFT bins + кэшированное окно (np.hanning каждый кадр — лишняя аллокация)
         self._freq_bins = np.fft.rfftfreq(self._block_size, 1.0 / self._sample_rate)
+        self._window = np.hanning(self._block_size).astype(np.float32)
 
     @property
     def running(self) -> bool:
@@ -179,7 +180,9 @@ class AudioEngine(QObject):
 
     def _compute_fft(self, chunk: np.ndarray) -> np.ndarray:
         """Возвращает magnitudes FFT (0..Nyquist)."""
-        window = np.hanning(len(chunk))
+        window = self._window
+        if len(chunk) != len(window):
+            window = np.hanning(len(chunk)).astype(np.float32)
         spectrum = np.fft.rfft(chunk * window)
         return np.abs(spectrum)
 

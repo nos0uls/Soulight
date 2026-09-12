@@ -83,6 +83,10 @@ class LEDDriver:
         # Per-LED цвета: список [(r, g, b), ...] для каждого LED
         # Если не None — используется вместо _current_color (приоритет)
         self._current_per_led = None
+        # Версия буфера per-LED — растёт при каждом set_per_led_colors.
+        # Send-loop шлёт пакет только при смене версии (иначе при audio 20 FPS
+        # драйвер слал бы 66 одинаковых 240-байтных пакетов в секунду).
+        self._per_led_version = 0
         # Текущая яркость в UI-единицах (0-255).
         # В wire-пакет конвертируется в hardware dimmer 0-1000 (_hw_dimmer).
         self._brightness = 255
@@ -229,6 +233,7 @@ class LEDDriver:
         if not self._connected:
             return
         self._current_per_led = list(colors_rgb)
+        self._per_led_version += 1
 
     def set_brightness(self, value):
         """
@@ -319,8 +324,13 @@ class LEDDriver:
         count = 0
         last_bright = None
         last_mode = None  # "per_led" | "solid" | "idle"
+        last_sent_version = -1  # версия per-LED буфера, уже ушедшая на контроллер
 
         while not self._send_stop.is_set():
+            # Версию читаем ДО списка: если producer обновит буфер между
+            # чтениями, мы отправим новый список под старой версией и просто
+            # пошлём его ещё раз — а не пропустим свежий кадр.
+            version = self._per_led_version
             per_led = self._current_per_led
             color = self._current_color
 
@@ -330,6 +340,7 @@ class LEDDriver:
             if current_mode != last_mode:
                 count = 0
                 last_mode = current_mode
+                last_sent_version = -1
 
             # Динамически отсылаем яркость при любом изменении (даже в per_led режиме)
             if self._brightness != last_bright:
@@ -339,9 +350,13 @@ class LEDDriver:
                 last_bright = self._brightness
 
             if per_led is not None:
-                # Per-LED режим: отправляем RGB transfer
-                rgb_pkt = self._bridge.make_rgb_transfer_packet(per_led)
-                self._safe_write(rgb_pkt)
+                # Шлём RGB transfer только при новом кадре (версия сменилась);
+                # периодический resend каждые ~40 итераций — страховка от
+                # потерянных пакетов, heartbeat держит соединение.
+                if version != last_sent_version or count % 40 == 0:
+                    rgb_pkt = self._bridge.make_rgb_transfer_packet(per_led)
+                    self._safe_write(rgb_pkt)
+                    last_sent_version = version
                 count += 1
 
                 if count % self._hb_every == 0:

@@ -11,7 +11,6 @@
 # - Таймер живёт в UI thread и управляет частотой запросов
 
 import threading
-from typing import List, Tuple
 
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 

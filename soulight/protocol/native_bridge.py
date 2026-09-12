@@ -5,9 +5,8 @@
 # pythonnet и Wine. Работает на Windows и Linux одинаково.
 #
 # Отличия от BeelightBridge по семантике:
-# - make_color_packet() эмулирует solid color через per-LED RGB transfer
-#   (все 75 LED одним цветом) — это проверенный путь, тот же что использует
-#   screen mirroring.
+# - make_color_packet() шлёт настоящую команду статичного цвета ctrl=4
+#   (GenColorPackage) — ту же, что legacy-бэкенд зовёт в .NET.
 # - make_bright_packet(dimmer) шлёт настоящую hardware-команду яркости
 #   (ctrl=2, dimmer 0..1000) — ту же, что GenBrightPackage в Beelight.exe.
 #   Яркость НЕ масштабируется программно: контроллер сам умножает dimmer
@@ -41,11 +40,13 @@ class NativeBridge:
         return lp.handshake_sequence()
 
     def make_color_packet(self, r, g, b):
-        """Solid color через per-LED transfer (все LED одним цветом)."""
+        """
+        Solid color — настоящая команда ctrl=4 (GenColorPackage),
+        ~10 байт вместо 75-LED RGB transfer (~240 байт).
+        """
         if not self._ready:
             return None
-        rgb = (int(r), int(g), int(b))
-        return lp.rgb_transfer([rgb] * lp.NUM_LEDS)
+        return lp.color(int(r), int(g), int(b))
 
     def make_bright_packet(self, dimmer):
         """

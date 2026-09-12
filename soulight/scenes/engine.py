@@ -5,9 +5,9 @@
 
 import threading
 import time
-from typing import Callable, List, Optional, Tuple
+from typing import Optional
 
-from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, pyqtSignal
 
 from soulight.scenes.patterns import PATTERNS
 

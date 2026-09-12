@@ -118,16 +118,19 @@ def vitality(frame_index: int, led_count: int, params: dict) -> List[Tuple[int, 
 
 
 def firework(frame_index: int, led_count: int, params: dict) -> List[Tuple[int, int, int]]:
-    """Имитация фейерверка: случайные вспышки по ленте."""
+    """Имитация фейерверка: случайные вспышки с постепенным затуханием."""
     speed = params.get("speed", 1.0)
     # Один всплеск каждые N кадров
     burst_interval = max(5, int(30 / speed))
-    colors = [(0, 0, 0)] * led_count
 
-    if frame_index % burst_interval == 0:
+    # Состояние затухания храним в params — объект живёт между кадрами.
+    prev = params.get("_fw_prev")
+
+    if frame_index % burst_interval == 0 or prev is None or len(prev) != led_count:
         center = random.randint(0, led_count - 1)
         hue = random.random()
         width = max(3, led_count // 8)
+        colors = [(0, 0, 0)] * led_count
         for i in range(led_count):
             dist = min(abs(i - center), led_count - abs(i - center))
             if dist < width:
@@ -135,8 +138,11 @@ def firework(frame_index: int, led_count: int, params: dict) -> List[Tuple[int, 
                 r, g, b = _hsv(hue, 1.0, decay)
                 colors[i] = (r, g, b)
     else:
-        # Затухание предыдущего кадра — обрабатывается engine через fade
-        pass
+        # Затухание предыдущего кадра (~0.85 за кадр при 20 FPS).
+        colors = [(_clamp(r * 0.85), _clamp(g * 0.85), _clamp(b * 0.85))
+                  for r, g, b in prev]
+
+    params["_fw_prev"] = colors
     return colors
 
 
