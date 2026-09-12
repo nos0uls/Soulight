@@ -268,8 +268,11 @@ class DriverBrightnessMappingTests(unittest.TestCase):
         except ImportError:
             self.skipTest("pyserial not installed")
         d = LEDDriver(protocol="native")
-        for ui, hw in ((0, 0), (255, 1000), (128, 501)):
+        for ui, hw in ((0, 0), (255, 1000), (128, 502)):
             d.set_brightness(ui)
+            # set_brightness ставит цель; _hw_dimmer читает текущую —
+            # эмулируем сходимость fade
+            d._brightness = float(d._target_brightness)
             self.assertEqual(d._hw_dimmer(), hw)
 
 

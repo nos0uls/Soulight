@@ -42,7 +42,17 @@ python -m soulight --headless --mode off
 ```
 
 Connect повторяется каждые 3с, пока контроллер не появится (флаг
-`--no-retry` отключает). systemd unit:
+`--no-retry` отключает).
+
+Дополнительные флаги:
+
+```bash
+--restore           # последний режим/цвет/яркость из настроек (переопределяет --mode)
+--auto-brightness   # автояркость: камера (ambient) + кривая день/ночь
+--camera N          # индекс веб-камеры для ambient-замера
+```
+
+systemd unit:
 
 ```ini
 [Unit]
@@ -58,6 +68,17 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
+## Автояркость (вкладка Auto)
+
+- **Ambient**: средняя luma кадра веб-камеры (`opencv-python-headless`,
+  опционально) → яркость ленты по порогам Dark/Bright и пределам Min/Max.
+- **Расписание**: cap яркости день/ночь с плавным переходом + тёплая
+  цветовая температура ночью. Итог = min(ambient, cap по времени).
+- Ручное движение слайдера яркости ставит авто-режим на паузу (5 мин).
+- Переходы яркости/цвета/температуры плавные (~0.3с) — вшито в драйвер.
+- Все настройки и последний режим сохраняются в `app_settings.json`
+  и восстанавливаются при старте (GUI и `--restore` в headless).
+
 ## Примечания
 
 - Контроллер просыпается по DTR+RTS; на Linux нужен доступ к порту
@@ -70,5 +91,7 @@ WantedBy=multi-user.target
 - Настройки (цвет, LED-раскладка): `%APPDATA%/Soulight` на Windows,
   `~/.config/soulight` на Linux.
 - `dotnet/SoulightBridge.dll` — опциональный fast-path для legacy backend.
-- Тесты: `python -m unittest tests.test_native_protocol` (включая валидацию
-  по реальному capture `tests/replay.csv`).
+- Desktop-ярлык (Linux): `./install_desktop.sh` — ставит иконку и
+  `soulight.desktop` в `~/.local/share/applications`.
+- Тесты: `python -m unittest discover -s tests` (44 теста, включая
+  валидацию по реальному capture `tests/replay.csv`).

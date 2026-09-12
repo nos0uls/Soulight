@@ -68,6 +68,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-retry", action="store_true",
                    help="не повторять connect при неудаче (default: retry "
                         "каждые 3с — удобно для автозапуска)")
+    p.add_argument("--restore", action="store_true",
+                   help="восстановить последний режим из настроек "
+                        "(переопределяет --mode/--color/...)")
+    p.add_argument("--auto-brightness", action="store_true",
+                   help="включить автояркость (камера + кривая день/ночь) "
+                        "с параметрами из настроек")
+    p.add_argument("--camera", type=int, default=None,
+                   help="индекс веб-камеры для автояркости")
     return p
 
 
@@ -126,9 +134,50 @@ def main(argv=None):
             print(f"{'(default)' if dev_id is None else dev_id}\t{label}")
         return 0
 
+    # --restore: последний режим из настроек переопределяет CLI-режим
+    if args.restore:
+        from soulight.app_settings import AppSettings
+        st = AppSettings()
+        mode = st.get("last_mode", "color")
+        if mode == "scene":
+            args.mode = "scene"
+            args.pattern = st.get("scene_pattern", "rainbow")
+            args.speed = st.get("scene_speed", 1.0)
+        elif mode == "audio":
+            args.mode = "audio"
+            args.audio_mode = st.get("audio_mode", "spectrum")
+            args.device = args.device or st.get("audio_device")
+        elif mode == "off":
+            args.mode = "off"
+        else:
+            args.mode = "color"
+            r, g, b = st.get("last_color", [255, 0, 255])
+            args.color = f"{r:02X}{g:02X}{b:02X}"
+        args.brightness = st.get("brightness", args.brightness)
+        args.auto_brightness = args.auto_brightness or st.get("auto_enabled", False)
+        print(f"[headless] restore: mode={args.mode}")
+
     config = LEDConfig()
     driver = LEDDriver(port=args.port) if args.port else LEDDriver()
     driver.set_brightness(args.brightness)
+
+    # Автояркость (камера + время) — по флагу или сохранённой настройке
+    auto_service = None
+    if args.auto_brightness:
+        from soulight.app_settings import AppSettings
+        from soulight.auto_brightness import AutoBrightnessService
+        st = AppSettings()
+        params = st.auto_params()
+        if args.camera is not None:
+            params["camera_index"] = args.camera
+        if not params["ambient_enabled"] and not params["time_enabled"]:
+            # Без источников сервис бесполезен — включаем оба дефолта.
+            params["ambient_enabled"] = True
+            params["time_enabled"] = True
+            print("[headless] auto-brightness: no sources in settings, "
+                  "enabling ambient+schedule defaults")
+        auto_service = AutoBrightnessService(driver, params)
+        auto_service.status_cb = lambda s: print(f"[auto] {s}")
 
     stop = threading.Event()
 
@@ -150,6 +199,9 @@ def main(argv=None):
             return 130
 
     try:
+        if auto_service is not None:
+            auto_service.start()
+            print("[headless] auto-brightness ON")
         if args.mode == "color":
             r, g, b = _parse_color(args.color)
             driver.set_color(r, g, b)
@@ -167,5 +219,7 @@ def main(argv=None):
             print("[headless] strip off")
             return 0
     finally:
+        if auto_service is not None:
+            auto_service.stop()
         driver.disconnect()
     return 0

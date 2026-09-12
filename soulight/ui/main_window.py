@@ -8,15 +8,17 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QSlider, QPushButton, QLineEdit, QGridLayout,
     QGroupBox, QFrame, QMessageBox, QTabWidget,
-    QComboBox, QCheckBox,
+    QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox, QTimeEdit,
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QTime
 from PyQt6.QtGui import QColor, QPainter, QFont
 
 from soulight.led_config import SIDE_COLORS, MAX_LEDS
 from soulight.protocol.serial_driver import LEDDriver
 from soulight.ui.led_config_widget import LEDConfigPanel
 from soulight.color_preset import ColorPreset
+from soulight.app_settings import AppSettings
+from soulight.auto_brightness import AutoBrightnessService, CV2_AVAILABLE
 from soulight.screen_mirroring.layout import build_layout
 from soulight.screen_mirroring.screen_capture import BETTERCAM_AVAILABLE
 from soulight.screen_mirroring.worker import MirrorWorker
@@ -231,6 +233,8 @@ class MainWindow(QMainWindow):
     # Используем их вместо invokeMethod, чтобы Qt гарантированно делал queued call.
     mirror_frame_requested = pyqtSignal()
     mirror_shutdown_requested = pyqtSignal()
+    # Статус сервиса автояркости → UI (сервис зовёт из своего потока)
+    _auto_status_signal = pyqtSignal(str)
 
     """
     Главное окно Soulight.
@@ -286,6 +290,14 @@ class MainWindow(QMainWindow):
         self._audio_active = False
         self._audio_thread = None
         self._audio_error_msg = None
+        # Настройки приложения + сервис автояркости (вкладка Auto)
+        self._settings = AppSettings()
+        self._auto_service = AutoBrightnessService(
+            self._driver, self._settings.auto_params())
+        self._mode_restored = False  # восстановление режима — один раз при старте
+        # Программный setValue слайдера яркости (загрузка пресета) не
+        # должен ставить автояркость на паузу как ручное изменение.
+        self._suppress_manual_pause = False
         # Этот флаг нужен, чтобы bulk-обновление слайдеров из пресета
         # не переводило preset selector в Custom посреди применения.
         self._applying_mirror_preset = False
@@ -373,6 +385,15 @@ class MainWindow(QMainWindow):
         audio_layout.setContentsMargins(8, 8, 8, 8)
         self._build_audio_tab(audio_layout)
         self._tabs.addTab(audio_page, "Audio")
+
+        # Вкладка 6: Auto — автояркость (ambient + время) и автоматизация.
+        # Последней, чтобы не сдвигать индексы существующих вкладок.
+        auto_page = QWidget()
+        auto_layout = QVBoxLayout(auto_page)
+        auto_layout.setSpacing(12)
+        auto_layout.setContentsMargins(8, 8, 8, 8)
+        self._build_auto_tab(auto_layout)
+        self._tabs.addTab(auto_page, "Auto")
 
         # Tab change handler для управления состоянием ленты
         self._tabs.currentChanged.connect(self._on_tab_changed)
@@ -894,6 +915,7 @@ class MainWindow(QMainWindow):
         self._screen_mirror_timer.start(self._mirror_interval_ms())
         self._btn_mirror_start.setEnabled(False)
         self._btn_mirror_stop.setEnabled(True)
+        self._save_mode("mirror")
         self._update_mirror_status(
             f"Running · {self._mirror_effective_fps()} FPS effective",
             "#2d8c2d",
@@ -1038,7 +1060,11 @@ class MainWindow(QMainWindow):
         # даже если подключения ещё нет.
         # Это важно, чтобы при первом успешном connect лента не вспыхивала на 255.
         self._driver.set_brightness(self._color_preset.brightness)
-        self._slider_bright.setValue(self._color_preset.brightness)
+        self._suppress_manual_pause = True
+        try:
+            self._slider_bright.setValue(self._color_preset.brightness)
+        finally:
+            self._suppress_manual_pause = False
         # Обновляем sliders и UI
         self._slider_r.setValue(r)
         self._slider_g.setValue(g)
@@ -1153,6 +1179,9 @@ class MainWindow(QMainWindow):
         self._color_preset.save()
         # Всегда синхронизируем яркость в драйвер.
         self._driver.set_brightness(value)
+        # Ручное изменение ставит автояркость на паузу
+        if not self._suppress_manual_pause:
+            self._auto_service.notify_manual_adjustment()
         
         # Синхронизируем Mirroring слайдер, чтобы они не разъезжались
         if self._mirror_brightness_slider.value() != value:
@@ -1202,6 +1231,7 @@ class MainWindow(QMainWindow):
             # потому что контроллер может сбрасывать dimmer после handshake.
             self._driver.set_brightness(self._slider_bright.value())
             self._send_current_color()
+            self._maybe_restore_mode()
         else:
             if is_auto and self._auto_connect_attempt < self._auto_connect_max_attempts:
                 next_attempt = self._auto_connect_attempt + 1
@@ -1285,6 +1315,8 @@ class MainWindow(QMainWindow):
                 and not self._scene_active
                 and not self._audio_active):
             self._driver.set_color(self._r, self._g, self._b)
+            self._save_mode("color", last_color=[self._r, self._g, self._b],
+                            brightness=self._slider_bright.value())
 
     # endregion
 
@@ -1392,6 +1424,8 @@ class MainWindow(QMainWindow):
         self._btn_scene_start.setEnabled(False)
         self._btn_scene_stop.setEnabled(True)
         self._driver.set_color(0, 0, 0)
+        self._save_mode("scene", scene_pattern=pattern_name,
+                        scene_speed=self._scene_speed_slider.value() / 100.0)
 
     def _stop_scenes(self):
         if self._scene_engine is not None:
@@ -1626,6 +1660,9 @@ class MainWindow(QMainWindow):
         self._audio_thread.started.connect(lambda: self._audio_engine.start(mode_name, device_id=device_id))
         self._audio_thread.start()
         self._audio_active = True
+        self._save_mode("audio", audio_mode=mode_name,
+                        audio_device=device_id,
+                        audio_fps=self._audio_fps_slider.value())
         self._audio_engine.set_sensitivity(self._audio_sens_slider.value() / 100.0)
         self._audio_engine.set_gain(self._audio_gain_slider.value() / 100.0)
         self._audio_engine.set_color_shift(self._audio_shift_slider.value() / 100.0)
@@ -1685,6 +1722,224 @@ class MainWindow(QMainWindow):
 
     # endregion
 
+    # region Auto (автояркость + автоматизация)
+
+    def _build_auto_tab(self, layout):
+        """Вкладка Auto: автояркость по камере и времени + restore."""
+        s = self._settings
+
+        self._auto_enable_cb = QCheckBox("Enable auto brightness")
+        self._auto_enable_cb.setChecked(s.get("auto_enabled"))
+        self._auto_enable_cb.toggled.connect(self._on_auto_enable_toggled)
+        layout.addWidget(self._auto_enable_cb)
+
+        self._auto_status_label = QLabel("—")
+        self._auto_status_label.setStyleSheet("color: #9399b2;")
+        layout.addWidget(self._auto_status_label)
+        note = QLabel("Ручное движение слайдера Brightness ставит авто-режим на паузу (5 мин).")
+        note.setStyleSheet("color: #6c7086; font-size: 11px;")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        # --- Ambient (веб-камера) ---
+        amb_group = QGroupBox("Room light (webcam)")
+        amb = QGridLayout(amb_group)
+
+        self._auto_ambient_cb = QCheckBox("Measure room brightness via webcam")
+        self._auto_ambient_cb.setChecked(s.get("auto_ambient_enabled"))
+        self._auto_ambient_cb.setEnabled(CV2_AVAILABLE)
+        self._auto_ambient_cb.toggled.connect(self._on_auto_param_changed)
+        amb.addWidget(self._auto_ambient_cb, 0, 0, 1, 2)
+        if not CV2_AVAILABLE:
+            no_cv = QLabel("opencv-python-headless не установлен")
+            no_cv.setStyleSheet("color: #f38ba8; font-size: 11px;")
+            amb.addWidget(no_cv, 0, 2)
+
+        amb.addWidget(QLabel("Camera index:"), 1, 0)
+        self._auto_camera_spin = QSpinBox()
+        self._auto_camera_spin.setRange(0, 9)
+        self._auto_camera_spin.setValue(int(s.get("auto_camera_index")))
+        self._auto_camera_spin.valueChanged.connect(self._on_auto_param_changed)
+        amb.addWidget(self._auto_camera_spin, 1, 1)
+
+        amb.addWidget(QLabel("Poll, s:"), 1, 2)
+        self._auto_poll_spin = QDoubleSpinBox()
+        self._auto_poll_spin.setRange(0.5, 60.0)
+        self._auto_poll_spin.setSingleStep(0.5)
+        self._auto_poll_spin.setValue(float(s.get("auto_poll_interval")))
+        self._auto_poll_spin.valueChanged.connect(self._on_auto_param_changed)
+        amb.addWidget(self._auto_poll_spin, 1, 3)
+
+        self._auto_luma_dark, self._auto_luma_dark_l = self._make_slider(
+            "Dark", int(s.get("auto_luma_dark")), self._on_auto_param_changed)
+        self._auto_luma_bright, self._auto_luma_bright_l = self._make_slider(
+            "Bright", int(s.get("auto_luma_bright")), self._on_auto_param_changed)
+        self._auto_min_level, self._auto_min_level_l = self._make_slider(
+            "Min", int(s.get("auto_min_level")), self._on_auto_param_changed)
+        self._auto_max_level, self._auto_max_level_l = self._make_slider(
+            "Max", int(s.get("auto_max_level")), self._on_auto_param_changed)
+        amb.addWidget(QLabel("Luma «dark»:"), 2, 0)
+        amb.addWidget(self._auto_luma_dark, 2, 1, 1, 2)
+        amb.addWidget(self._auto_luma_dark_l, 2, 3)
+        amb.addWidget(QLabel("Luma «bright»:"), 3, 0)
+        amb.addWidget(self._auto_luma_bright, 3, 1, 1, 2)
+        amb.addWidget(self._auto_luma_bright_l, 3, 3)
+        amb.addWidget(QLabel("Strip min:"), 4, 0)
+        amb.addWidget(self._auto_min_level, 4, 1, 1, 2)
+        amb.addWidget(self._auto_min_level_l, 4, 3)
+        amb.addWidget(QLabel("Strip max:"), 5, 0)
+        amb.addWidget(self._auto_max_level, 5, 1, 1, 2)
+        amb.addWidget(self._auto_max_level_l, 5, 3)
+        layout.addWidget(amb_group)
+
+        # --- Время суток ---
+        time_group = QGroupBox("Day / night curve")
+        tg = QGridLayout(time_group)
+
+        self._auto_time_cb = QCheckBox("Enable day/night schedule")
+        self._auto_time_cb.setChecked(s.get("auto_time_enabled"))
+        self._auto_time_cb.toggled.connect(self._on_auto_param_changed)
+        tg.addWidget(self._auto_time_cb, 0, 0, 1, 2)
+
+        def _time_edit(hour):
+            e = QTimeEdit()
+            h = int(hour)
+            e.setTime(QTime(h, int(round((hour - h) * 60))))
+            e.setDisplayFormat("HH:mm")
+            e.timeChanged.connect(self._on_auto_param_changed)
+            return e
+
+        tg.addWidget(QLabel("Day starts:"), 1, 0)
+        self._auto_day_start = _time_edit(float(s.get("auto_day_start")))
+        tg.addWidget(self._auto_day_start, 1, 1)
+        tg.addWidget(QLabel("Night starts:"), 1, 2)
+        self._auto_night_start = _time_edit(float(s.get("auto_night_start")))
+        tg.addWidget(self._auto_night_start, 1, 3)
+
+        self._auto_day_cap, self._auto_day_cap_l = self._make_slider(
+            "Day", int(s.get("auto_day_cap")), self._on_auto_param_changed)
+        self._auto_night_cap, self._auto_night_cap_l = self._make_slider(
+            "Night", int(s.get("auto_night_cap")), self._on_auto_param_changed)
+        tg.addWidget(QLabel("Day cap:"), 2, 0)
+        tg.addWidget(self._auto_day_cap, 2, 1, 1, 2)
+        tg.addWidget(self._auto_day_cap_l, 2, 3)
+        tg.addWidget(QLabel("Night cap:"), 3, 0)
+        tg.addWidget(self._auto_night_cap, 3, 1, 1, 2)
+        tg.addWidget(self._auto_night_cap_l, 3, 3)
+
+        tg.addWidget(QLabel("Transition, min:"), 4, 0)
+        self._auto_transition_spin = QSpinBox()
+        self._auto_transition_spin.setRange(5, 180)
+        self._auto_transition_spin.setValue(int(s.get("auto_transition_min")))
+        self._auto_transition_spin.valueChanged.connect(self._on_auto_param_changed)
+        tg.addWidget(self._auto_transition_spin, 4, 1)
+
+        tg.addWidget(QLabel("Night warmth:"), 4, 2)
+        self._auto_warmth, self._auto_warmth_l = self._make_slider(
+            "Warm", int(s.get("auto_warmth_night") * 100), self._on_auto_param_changed)
+        self._auto_warmth.setRange(0, 100)
+        tg.addWidget(self._auto_warmth, 4, 3)
+        layout.addWidget(time_group)
+
+        # --- Автозапуск режима ---
+        self._restore_mode_cb = QCheckBox("Restore last mode on startup")
+        self._restore_mode_cb.setChecked(s.get("restore_mode"))
+        self._restore_mode_cb.toggled.connect(
+            lambda v: self._settings.set("restore_mode", bool(v)))
+        layout.addWidget(self._restore_mode_cb)
+
+        layout.addStretch()
+
+        # Индикатор сервиса → UI (вызывается из потока сервиса — через сигнал)
+        self._auto_service.status_cb = self._auto_status_signal.emit
+        self._auto_status_signal.connect(self._auto_status_label.setText)
+
+        if self._auto_enable_cb.isChecked():
+            self._auto_service.start()
+
+    def _on_auto_enable_toggled(self, checked):
+        self._settings.set("auto_enabled", bool(checked))
+        if checked:
+            self._apply_auto_params()
+            self._auto_service.start()
+        else:
+            self._auto_service.stop()
+            # Возвращаем ручную яркость и нейтральную температуру
+            if self._driver.connected:
+                self._driver.set_temperature(0.0)
+                self._driver.set_brightness(self._slider_bright.value())
+
+    def _on_auto_param_changed(self, *args):
+        """Сохраняет параметры и передаёт их в сервис."""
+        self._apply_auto_params()
+
+    def _apply_auto_params(self):
+        """UI → settings → service params."""
+        def hhmm(e):
+            t = e.time()
+            return t.hour() + t.minute() / 60.0
+
+        self._settings.update(
+            auto_ambient_enabled=self._auto_ambient_cb.isChecked(),
+            auto_camera_index=self._auto_camera_spin.value(),
+            auto_poll_interval=self._auto_poll_spin.value(),
+            auto_luma_dark=float(self._auto_luma_dark.value()),
+            auto_luma_bright=float(self._auto_luma_bright.value()),
+            auto_min_level=self._auto_min_level.value(),
+            auto_max_level=self._auto_max_level.value(),
+            auto_time_enabled=self._auto_time_cb.isChecked(),
+            auto_day_start=hhmm(self._auto_day_start),
+            auto_night_start=hhmm(self._auto_night_start),
+            auto_day_cap=self._auto_day_cap.value(),
+            auto_night_cap=self._auto_night_cap.value(),
+            auto_transition_min=self._auto_transition_spin.value(),
+            auto_warmth_night=self._auto_warmth.value() / 100.0,
+        )
+        self._auto_service.update_params(**self._settings.auto_params())
+
+    def _maybe_restore_mode(self):
+        """Восстанавливает последний активный режим — один раз при старте."""
+        if self._mode_restored:
+            return
+        self._mode_restored = True
+        if not self._settings.get("restore_mode"):
+            return
+        mode = self._settings.get("last_mode", "color")
+        if mode == "scene":
+            pattern = self._settings.get("scene_pattern", "rainbow")
+            for i in range(self._scene_pattern_combo.count()):
+                if self._scene_pattern_combo.itemData(i) == pattern:
+                    self._scene_pattern_combo.setCurrentIndex(i)
+                    break
+            self._scene_speed_slider.setValue(
+                int(self._settings.get("scene_speed", 1.0) * 100))
+            self._tabs.setCurrentIndex(3)
+            self._start_scenes(pattern)
+        elif mode == "audio":
+            am = self._settings.get("audio_mode", "spectrum")
+            for i in range(self._audio_mode_combo.count()):
+                if self._audio_mode_combo.itemData(i) == am:
+                    self._audio_mode_combo.setCurrentIndex(i)
+                    break
+            self._audio_fps_slider.setValue(int(self._settings.get("audio_fps", 30)))
+            dev = self._settings.get("audio_device")
+            if dev is not None:
+                for i in range(self._audio_source_combo.count()):
+                    if self._audio_source_combo.itemData(i) == dev:
+                        self._audio_source_combo.setCurrentIndex(i)
+                        break
+            self._tabs.setCurrentIndex(4)
+            self._start_audio(am, self._audio_source_combo.currentData())
+        elif mode == "mirror":
+            self._tabs.setCurrentIndex(2)
+            self._start_screen_mirroring()
+        # "color" — уже восстановлен через _send_current_color
+
+    def _save_mode(self, name, **extra):
+        self._settings.update(last_mode=name, **extra)
+
+    # endregion
+
     # region Speed mode
 
     def _on_speed_mode_clicked(self, interval, label):
@@ -1699,6 +1954,7 @@ class MainWindow(QMainWindow):
         self._stop_screen_mirroring(restore_output=False)
         self._stop_scenes()
         self._stop_audio()
+        self._auto_service.stop()
         if self._driver.connected:
             self._driver.disconnect()
         event.accept()
