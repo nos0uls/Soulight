@@ -83,7 +83,8 @@ class LEDDriver:
         # Per-LED цвета: список [(r, g, b), ...] для каждого LED
         # Если не None — используется вместо _current_color (приоритет)
         self._current_per_led = None
-        # Текущая яркость (0-255)
+        # Текущая яркость в UI-единицах (0-255).
+        # В wire-пакет конвертируется в hardware dimmer 0-1000 (_hw_dimmer).
         self._brightness = 255
         # Интервал между пакетами в секундах
         # 15ms позволяет отсылать до 66 пакетов в секунду (честные 60 FPS для mirroring)
@@ -206,6 +207,7 @@ class LEDDriver:
 
         self._connected = False
         self._current_color = None
+        self._current_per_led = None
         print("[Driver] Отключено")
 
     def set_color(self, r, g, b):
@@ -247,6 +249,14 @@ class LEDDriver:
         self._send_interval = max(0.001, float(interval))
 
     # === Внутренние методы ===
+
+    def _hw_dimmer(self):
+        """
+        Конвертирует UI-яркость (0-255) в hardware dimmer контроллера (0-1000).
+        Оба backend'а принимают hardware-единицу — так же, как оригинальное
+        приложение шлёт GenBrightPackage(dimmer 0..1000).
+        """
+        return self._brightness * 1000 // 255
 
     def _handshake(self):
         """
@@ -323,7 +333,7 @@ class LEDDriver:
 
             # Динамически отсылаем яркость при любом изменении (даже в per_led режиме)
             if self._brightness != last_bright:
-                bright_pkt = self._bridge.make_bright_packet(self._brightness)
+                bright_pkt = self._bridge.make_bright_packet(self._hw_dimmer())
                 self._safe_write(bright_pkt)
                 self._send_stop.wait(0.005)
                 last_bright = self._brightness
@@ -345,7 +355,7 @@ class LEDDriver:
                 # Solid Color режим:
                 # Контроллер сбрасывает dimmer иногда, поэтому дублируем яркость каждые 50 пакетов
                 if count % 50 == 0:
-                    bright_pkt = self._bridge.make_bright_packet(self._brightness)
+                    bright_pkt = self._bridge.make_bright_packet(self._hw_dimmer())
                     self._safe_write(bright_pkt)
                     self._send_stop.wait(0.005)
 

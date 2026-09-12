@@ -96,12 +96,19 @@ def main():
     drain(fd, "switch_on")
     wr(fd, lp.set_work_mode(0), 0.05)
     drain(fd, "workmode")
+    # Нормализуем hardware dimmer — устройство помнит его между сессиями.
+    wr(fd, lp.brightness(1000), 0.05)
 
     print("Colors:")
     hold_color(fd, (255, 0, 0), "RED")
     hold_color(fd, (0, 255, 0), "GREEN")
     hold_color(fd, (0, 0, 255), "BLUE")
     hold_color(fd, (255, 255, 255), "WHITE")
+
+    print("Hardware dimmer (red 20% -> 60% -> 100%):")
+    for dim, label in ((200, "20%"), (600, "60%"), (1000, "100%")):
+        wr(fd, lp.brightness(dim), 0.05)
+        hold_color(fd, (255, 0, 0), f"RED dimmer={dim} ({label})")
 
     print("Off:")
     hold_color(fd, (0, 0, 0), "BLACK")

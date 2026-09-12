@@ -7,11 +7,11 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QSlider, QPushButton, QLineEdit, QGridLayout,
-    QGroupBox, QFrame, QSizePolicy, QMessageBox, QTabWidget,
+    QGroupBox, QFrame, QMessageBox, QTabWidget,
     QComboBox, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QLinearGradient, QMouseEvent, QFont
+from PyQt6.QtGui import QColor, QPainter, QFont
 
 from soulight.led_config import SIDE_COLORS, MAX_LEDS
 from soulight.protocol.serial_driver import LEDDriver
@@ -21,9 +21,9 @@ from soulight.screen_mirroring.layout import build_layout
 from soulight.screen_mirroring.screen_capture import BETTERCAM_AVAILABLE
 from soulight.screen_mirroring.worker import MirrorWorker
 from soulight.scenes.engine import SceneEngine
-from soulight.scenes.patterns import PATTERN_LABELS
-from soulight.audio.engine import AudioEngine
-from soulight.audio.modes import MODE_LABELS
+from soulight.scenes.patterns import PATTERN_LABELS, PATTERNS
+from soulight.audio.engine import AudioEngine, list_capture_devices
+from soulight.audio.modes import MODE_LABELS, AUDIO_MODES
 
 
 # region QSS Theme (Catppuccin Mocha)
@@ -577,11 +577,11 @@ class MainWindow(QMainWindow):
         sat_row.addWidget(self._mirror_sat_label)
         tuning_layout.addLayout(sat_row)
 
-        # Brightness — аппаратная яркость LED при mirroring (0-255)
+        # Brightness — аппаратная яркость LED (hardware dimmer контроллера).
+        # Это alias мастер-слайдера с вкладки Color: они двунаправленно синхронны.
         self._mirror_brightness_slider, self._mirror_brightness_label = self._make_slider(
             "Brightness", 255, self._on_mirror_brightness_changed
         )
-        # Теперь это напрямую управляет Hardware Dimmer контроллера
         self._mirror_brightness_slider.setRange(0, 255)
         self._mirror_brightness_label.setText("255")
         brightness_row = QHBoxLayout()
@@ -718,10 +718,6 @@ class MainWindow(QMainWindow):
     def _mirror_effective_fps(self):
         """Effective FPS, который реально имеет смысл просить у worker."""
         return min(self._mirror_requested_fps(), self._mirror_practical_max_fps())
-
-    def _mirror_brightness_gain(self):
-        """Software brightness gain для mirroring-картинки."""
-        return max(0.0, float(self._mirror_brightness_slider.value()) / 100.0)
 
     def _mirror_preset_target_fps(self, preset):
         """Переводит preset policy в конкретное requested FPS значение."""
@@ -893,8 +889,7 @@ class MainWindow(QMainWindow):
             focus_widget.clearFocus()
         # Убираем solid color, чтобы per-LED не конфликтовал
         self._driver.set_color(0, 0, 0)
-        # Во время mirroring master brightness берём из основного global slider.
-        # Отдельный mirror brightness теперь управляет именно gain sampled цветов.
+        # Hardware dimmer — из основного слайдера (mirror-слайдер ему синхронен).
         self._driver.set_brightness(self._slider_bright.value())
         self._screen_mirror_timer.start(self._mirror_interval_ms())
         self._btn_mirror_start.setEnabled(False)
@@ -928,10 +923,8 @@ class MainWindow(QMainWindow):
         self._btn_mirror_stop.setEnabled(False)
         self._update_mirror_status("Idle")
         if restore_output and self._driver.connected:
-            if self._current_tab == 0:
-                self._driver.set_color(self._r, self._g, self._b)
-            else:
-                self._driver.set_color(0, 0, 0)
+            # Возвращаем выбранный статичный цвет — как при Stop в Scenes/Audio.
+            self._driver.set_color(self._r, self._g, self._b)
 
     def _tick_screen_mirroring(self):
         """
@@ -960,6 +953,9 @@ class MainWindow(QMainWindow):
         """Slot: worker поймал ошибку при capture/sample."""
         self._mirror_frame_pending = False
         self._stop_screen_mirroring(restore_output=False)
+        # Лента не должна остаться замороженной на последнем кадре.
+        if self._driver.connected:
+            self._driver.set_color(self._r, self._g, self._b)
         self._update_mirror_status(f"Error: {error_msg}", "#f38ba8")
 
     def _on_mirror_monitor_changed(self, index):
@@ -1009,9 +1005,7 @@ class MainWindow(QMainWindow):
         self._mirror_brightness_label.setText(str(val))
         if not self._applying_mirror_preset:
             self._set_mirror_preset_combo_value("custom")
-        
-        # Блокируем сигналы мастер-слайдера, чтобы избежать рекурсии, если понадобится,
-        # но в данном случае достаточно просто вызвать setValue
+        # setValue мастер-слайдера вызовет _on_brightness_changed → драйвер.
         self._slider_bright.setValue(val)
 
     def _on_mirror_fps_changed(self):
@@ -1307,6 +1301,7 @@ class MainWindow(QMainWindow):
         self._scene_pattern_combo = QComboBox()
         for key, label in PATTERN_LABELS.items():
             self._scene_pattern_combo.addItem(label, key)
+        self._scene_pattern_combo.currentIndexChanged.connect(self._on_scene_pattern_changed)
         pattern_layout.addWidget(self._scene_pattern_combo)
         layout.addWidget(pattern_group)
 
@@ -1360,6 +1355,13 @@ class MainWindow(QMainWindow):
         if self._scene_engine is not None:
             self._scene_engine.set_speed(v / 100.0)
 
+    def _on_scene_pattern_changed(self, index):
+        """Live-переключение паттерна без остановки engine."""
+        pattern = self._scene_pattern_combo.currentData()
+        if self._scene_active and self._scene_engine is not None and pattern in PATTERNS:
+            self._scene_engine.set_pattern(pattern)
+            self._scene_status_label.setText(f"Running: {PATTERN_LABELS.get(pattern, pattern)}")
+
     def _on_scene_start_clicked(self):
         if not self._driver.connected:
             QMessageBox.warning(self, "Not connected", "Connect to the controller first.")
@@ -1399,11 +1401,16 @@ class MainWindow(QMainWindow):
             self._scene_thread.quit()
             self._scene_thread.wait(2000)
             self._scene_thread = None
+        was_active = self._scene_active
         self._scene_active = False
         self._scene_status_label.setText("Idle")
         self._scene_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
         self._btn_scene_start.setEnabled(True)
         self._btn_scene_stop.setEnabled(False)
+        # После остановки анимации возвращаем ленту к выбранному статичному
+        # цвету — иначе она остаётся замороженной на последнем кадре.
+        if was_active and self._driver.connected:
+            self._driver.set_color(self._r, self._g, self._b)
 
     def _on_scene_frame_ready(self, colors):
         if self._scene_active and self._driver.connected:
@@ -1427,21 +1434,28 @@ class MainWindow(QMainWindow):
         mode_group = QGroupBox("Audio Settings")
         mode_layout = QVBoxLayout(mode_group)
 
-        # Audio Source
+        # Audio Source — конкретное устройство вывода (loopback) или микрофон
         source_row = QHBoxLayout()
         source_row.addWidget(QLabel("Source:"))
         self._audio_source_combo = QComboBox()
-        self._audio_source_combo.addItem("Microphone", False)
-        self._audio_source_combo.addItem("System Audio (Loopback)", True)
-        source_row.addWidget(self._audio_source_combo)
+        self._audio_source_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        source_row.addWidget(self._audio_source_combo, stretch=1)
+        btn_audio_refresh = QPushButton("Refresh")
+        btn_audio_refresh.setToolTip("Перечислить аудио-устройства заново")
+        btn_audio_refresh.clicked.connect(self._populate_audio_sources)
+        source_row.addWidget(btn_audio_refresh)
         mode_layout.addLayout(source_row)
+        self._populate_audio_sources()
 
-        # Mode
+        # Mode — переключается на лету, без остановки захвата
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Mode:"))
         self._audio_mode_combo = QComboBox()
         for key, label in MODE_LABELS.items():
             self._audio_mode_combo.addItem(label, key)
+        self._audio_mode_combo.currentIndexChanged.connect(self._on_audio_mode_changed)
         mode_row.addWidget(self._audio_mode_combo)
         mode_layout.addLayout(mode_row)
 
@@ -1557,6 +1571,27 @@ class MainWindow(QMainWindow):
             self._audio_engine.set_fps(v)
             self._update_audio_status_running()
 
+    def _populate_audio_sources(self):
+        """Перечисляет устройства захвата: выходы (loopback) и микрофоны."""
+        prev = self._audio_source_combo.currentData()
+        self._audio_source_combo.blockSignals(True)
+        self._audio_source_combo.clear()
+        for dev_id, label, _is_lb in list_capture_devices():
+            self._audio_source_combo.addItem(label, dev_id)
+        if prev is not None:
+            for i in range(self._audio_source_combo.count()):
+                if self._audio_source_combo.itemData(i) == prev:
+                    self._audio_source_combo.setCurrentIndex(i)
+                    break
+        self._audio_source_combo.blockSignals(False)
+
+    def _on_audio_mode_changed(self, index):
+        """Live-переключение аудио-режима без остановки захвата."""
+        mode = self._audio_mode_combo.currentData()
+        if self._audio_active and self._audio_engine is not None and mode in AUDIO_MODES:
+            self._audio_engine.set_mode(mode)
+            self._update_audio_status_running()
+
     def _on_audio_start_clicked(self):
         if not self._driver.connected:
             QMessageBox.warning(self, "Not connected", "Connect to the controller first.")
@@ -1570,8 +1605,9 @@ class MainWindow(QMainWindow):
             self._audio_status_label.setText(f"Running: {MODE_LABELS.get(mode, mode)} · {fps} FPS")
             self._audio_status_label.setStyleSheet("color: #2d8c2d; font-weight: bold;")
 
-    def _start_audio(self, mode_name: str, use_loopback: bool):
+    def _start_audio(self, mode_name: str, device_id):
         self._stop_audio()
+        self._audio_error_msg = None
         self._audio_thread = QThread()
         # led_count берём из актуального LED конфига, а не хардкодим
         actual_led_count = self._led_config_panel.config.total
@@ -1587,7 +1623,7 @@ class MainWindow(QMainWindow):
         self._audio_engine.frame_ready.connect(self._on_audio_frame_ready)
         self._audio_engine.error_occurred.connect(self._on_audio_error)
         self._audio_engine.status_changed.connect(self._on_audio_status_changed)
-        self._audio_thread.started.connect(lambda: self._audio_engine.start(mode_name, use_loopback=use_loopback))
+        self._audio_thread.started.connect(lambda: self._audio_engine.start(mode_name, device_id=device_id))
         self._audio_thread.start()
         self._audio_active = True
         self._audio_engine.set_sensitivity(self._audio_sens_slider.value() / 100.0)
@@ -1607,17 +1643,19 @@ class MainWindow(QMainWindow):
             self._audio_thread.quit()
             self._audio_thread.wait(2000)
             self._audio_thread = None
+        was_active = self._audio_active
         self._audio_active = False
         if not getattr(self, "_audio_error_msg", None):
             self._audio_status_label.setText("Idle")
             self._audio_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
         self._btn_audio_start.setEnabled(True)
         self._btn_audio_stop.setEnabled(False)
+        # Возвращаем статичный цвет — иначе лента замирает на последнем
+        # аудио-кадре.
+        if was_active and self._driver.connected:
+            self._driver.set_color(self._r, self._g, self._b)
 
     def _on_audio_frame_ready(self, colors):
-        # TODO: фактическая отправка per-LED цветов на ленту протестирована только
-        # логически. Без подключенного контроллера невозможно проверить, что цвета
-        # отображаются корректно и в правильном порядке.
         if self._audio_active and self._driver.connected:
             self._driver.set_per_led_colors(colors)
 

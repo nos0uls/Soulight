@@ -142,6 +142,22 @@ class CommandBuilderTests(unittest.TestCase):
         self.assertEqual(lp.decrypt_payload(lp.set_work_mode(0)[5:]),
                          b"\x00\x05\x06\xff\x03" + b"\x00" * 4)
 
+    def test_brightness(self):
+        """GenBrightPackage: [2, ch, 2, 0, dimmer u16le], dimmer 0..1000."""
+        self.assertEqual(lp.decrypt_payload(lp.brightness(1000)[5:]),
+                         b"\x00\x05\x02\xff\x02\x00" + (1000).to_bytes(2, "little"))
+        self.assertEqual(lp.decrypt_payload(lp.brightness(0)[5:]),
+                         b"\x00\x05\x02\xff\x02\x00\x00\x00")
+
+    def test_brightness_clamps_to_1000(self):
+        self.assertEqual(lp.decrypt_payload(lp.brightness(9999)[5:]),
+                         b"\x00\x05\x02\xff\x02\x00" + (1000).to_bytes(2, "little"))
+
+    def test_color(self):
+        """GenColorPackage: [4, ch, 3, 0, R, G, B]."""
+        self.assertEqual(lp.decrypt_payload(lp.color(255, 0, 128)[5:]),
+                         b"\x00\x05\x04\xff\x03\x00\xff\x00\x80")
+
 
 @unittest.skipUnless(os.path.exists(REPLAY_CSV), "replay.csv not found")
 class CaptureCompatibilityTests(unittest.TestCase):
@@ -218,13 +234,20 @@ class NativeBridgeTests(unittest.TestCase):
         self.assertEqual(len(led), 225)
         self.assertEqual(set(led), {200, 100, 50})
 
-    def test_brightness_scales_rgb(self):
-        self.b.make_bright_packet(128)
+    def test_brightness_is_hardware_packet(self):
+        """Яркость — настоящий wire-пакет (ctrl=2), НЕ software-скейлинг RGB."""
+        pkt = self.b.make_bright_packet(500)
+        self.assertIsNotNone(pkt)
+        self.assertEqual(lp.decrypt_payload(pkt[5:]),
+                         b"\x00\x05\x02\xff\x02\x00" + (500).to_bytes(2, "little"))
+
+    def test_brightness_does_not_scale_rgb(self):
+        """Регрессия: после make_bright_packet цвет остаётся без software-скейлинга
+        (dimmer применяет сам контроллер)."""
+        self.b.make_bright_packet(0)
         wire = self.b.make_color_packet(255, 255, 255)
         data = lp.decrypt_payload(wire[5:])
-        led = data[8:]
-        expected = int(255 * 128 / 255)
-        self.assertEqual(set(led), {expected})
+        self.assertEqual(set(data[8:]), {255})
 
     def test_heartbeat(self):
         hb = self.b.get_heartbeat()
@@ -236,6 +259,20 @@ class NativeBridgeTests(unittest.TestCase):
         self.assertGreater(len(seq), 0)
         for pkt in seq:
             self.assertEqual(pkt[:3], lp.FRAME_MAGIC)
+
+
+class DriverBrightnessMappingTests(unittest.TestCase):
+    """UI-яркость 0-255 конвертируется в hardware dimmer 0-1000."""
+
+    def test_hw_dimmer_mapping(self):
+        try:
+            from soulight.protocol.serial_driver import LEDDriver
+        except ImportError:
+            self.skipTest("pyserial not installed")
+        d = LEDDriver(protocol="native")
+        for ui, hw in ((0, 0), (255, 1000), (128, 501)):
+            d.set_brightness(ui)
+            self.assertEqual(d._hw_dimmer(), hw)
 
 
 if __name__ == "__main__":

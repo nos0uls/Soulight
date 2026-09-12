@@ -33,7 +33,13 @@ native если нет pythonnet+Beelight.exe). Порт: `SOULIGHT_PORT` или
 
 - Контроллер просыпается по DTR+RTS; на Linux нужен доступ к порту
   (`sudo usermod -aG dialout $USER`).
+- Яркость — hardware dimmer контроллера (UI 0-255 → wire 0-1000),
+  единый для всех режимов.
+- Аудио: захват с выбранного устройства вывода (loopback/monitor source)
+  или микрофона — выбирается на вкладке Audio.
 - Screen capture: `bettercam` (Windows) → fallback `mss`.
+- Настройки (цвет, LED-раскладка): `%APPDATA%/Soulight` на Windows,
+  `~/.config/soulight` на Linux.
 - `dotnet/SoulightBridge.dll` — опциональный fast-path для legacy backend.
 - Тесты: `python -m unittest tests.test_native_protocol` (включая валидацию
   по реальному capture `tests/replay.csv`).

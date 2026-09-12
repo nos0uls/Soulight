@@ -22,3 +22,7 @@ Thumbs.db
 venv/
 soulight/color_preset.json
 led_config.json
+
+# User settings (живут в %APPDATA%/Soulight или ~/.config/soulight)
+led_config.json
+soulight/color_preset.json

@@ -6,9 +6,20 @@
 
 import json
 import os
+import sys
 
-# Путь для сохранения конфигурации
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "led_config.json")
+# Конфиг живёт в user-config директории — внутри пакета/рядом с ним писать
+# нельзя: при frozen-сборке __file__ указывает во временный каталог.
+def _config_dir():
+    if sys.platform == "win32":
+        base = os.getenv("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "Soulight")
+    return os.path.join(os.path.expanduser("~"), ".config", "soulight")
+
+
+CONFIG_PATH = os.path.join(_config_dir(), "led_config.json")
+# Старый путь (корень проекта) — читаем один раз для миграции.
+_LEGACY_PATH = os.path.join(os.path.dirname(__file__), "..", "led_config.json")
 
 
 # region Константы сторон и направлений
@@ -174,6 +185,9 @@ class LEDConfig:
             "start_offset": self.start_offset,
         }
         try:
+            dirname = os.path.dirname(path)
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
@@ -181,7 +195,8 @@ class LEDConfig:
 
     def load(self, path=None):
         """Загружает конфигурацию из JSON файла. Возвращает True при успехе."""
-        path = path or CONFIG_PATH
+        if path is None:
+            path = CONFIG_PATH if os.path.exists(CONFIG_PATH) else _LEGACY_PATH
         if not os.path.exists(path):
             return False
         try:

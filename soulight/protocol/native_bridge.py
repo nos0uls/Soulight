@@ -8,11 +8,10 @@
 # - make_color_packet() эмулирует solid color через per-LED RGB transfer
 #   (все 75 LED одним цветом) — это проверенный путь, тот же что использует
 #   screen mirroring.
-# - Яркость применяется программно (масштабирование RGB). Отдельной
-#   hardware-команды яркости в captures не найдено; software-яркость
-#   теряет точность в нижнем диапазоне, но работает везде.
-# - make_switch_packet(False) и make_workmode_pc_packet() — кандидаты по
-#   симметрии с захваченными пакетами; финальная проверка — на железе.
+# - make_bright_packet(dimmer) шлёт настоящую hardware-команду яркости
+#   (ctrl=2, dimmer 0..1000) — ту же, что GenBrightPackage в Beelight.exe.
+#   Яркость НЕ масштабируется программно: контроллер сам умножает dimmer
+#   на RGB, поэтому яркость едина для solid/per-LED/scene/audio режимов.
 
 from soulight.protocol import lightprotocol as lp
 
@@ -22,8 +21,6 @@ class NativeBridge:
 
     def __init__(self):
         self._ready = False
-        # Программная яркость 0..1, применяется к RGB при сборке пакета.
-        self._brightness = 1.0
         self._heartbeat_pkt = None
 
     def init(self):
@@ -47,16 +44,17 @@ class NativeBridge:
         """Solid color через per-LED transfer (все LED одним цветом)."""
         if not self._ready:
             return None
-        rgb = self._scale(int(r), int(g), int(b))
+        rgb = (int(r), int(g), int(b))
         return lp.rgb_transfer([rgb] * lp.NUM_LEDS)
 
     def make_bright_packet(self, dimmer):
         """
-        Программная яркость: сохраняет значение, пакета не генерирует.
-        Возвращает None — драйвер пропускает None в _safe_write.
+        Аппаратная яркость контроллера, dimmer в hardware-единицах 0..1000.
+        (UI 0..255 конвертирует драйвер — так же, как у BeelightBridge.)
         """
-        self._brightness = max(0, min(255, int(dimmer))) / 255.0
-        return None
+        if not self._ready:
+            return None
+        return lp.brightness(dimmer)
 
     def make_switch_packet(self, on):
         """Switch ON/OFF. OFF-вариант — кандидат, проверить на железе."""
@@ -77,13 +75,8 @@ class NativeBridge:
         """
         if not self._ready:
             return None
-        scaled = [self._scale(r, g, b) for r, g, b in colors_rgb]
-        return lp.rgb_transfer(scaled)
+        return lp.rgb_transfer(colors_rgb)
 
     def get_heartbeat(self):
         """Heartbeat-пакет (предгенерированный при init)."""
         return self._heartbeat_pkt
-
-    def _scale(self, r, g, b):
-        k = self._brightness
-        return (int(r * k), int(g * k), int(b * k))

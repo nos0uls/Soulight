@@ -8,7 +8,6 @@
 # автоматически при загрузке assembly — поэтому reflection работает.
 
 import os
-import sys
 
 try:
     import clr
@@ -77,8 +76,7 @@ class BeelightBridge:
 
         # Импортируем .NET типы через pythonnet
         from System.Reflection import Assembly, BindingFlags
-        from System.IO import Path as NetPath
-        from System import AppDomain, ResolveEventHandler, Enum, Type
+        from System import AppDomain, Enum
 
         # Проверяем наличие файла
         if not os.path.exists(BEELIGHT_EXE):
@@ -212,7 +210,9 @@ class BeelightBridge:
 
     def make_bright_packet(self, dimmer):
         """
-        Генерирует wire-format пакет яркости (0-255).
+        Генерирует wire-format пакет аппаратной яркости.
+        dimmer — hardware-единицы 0..1000 (GenBrightPackage клампит на 1000);
+        драйвер конвертирует UI 0-255 → 0-1000 перед вызовом.
         Возвращает bytes или None при ошибке.
         """
         if not self._ready or self._gen_bright is None:

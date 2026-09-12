@@ -21,18 +21,20 @@
 #   Ключ случаен и не связан с данными — связность пакета обеспечивает
 #   только checksum.
 #
-# Команды (data = ctrl + channelMark + payload, little-endian где применимо;
-# attr=0 REQ, cmd=5 CTRL_DEVICE для всех ctrl-команд):
+# Команды (data = ctrl + channelMark + len u16le + payload;
+# attr=0 REQ, cmd=5 CTRL_DEVICE для всех ctrl-команд;
+# раскладки восстановлены из расшифрованного IL LProtocolCtrl.*):
 #   00 01                          — запрос device-info (attr=0, cmd=1 FIRM)
 #   00 02                          — запрос каналов (attr=0, cmd=2 SYNCSTATUS)
 #   00 03                          — запрос возможностей (attr=0, cmd=3 SYNCCONFIG)
 #   01 00                          — heartbeat (attr=1, cmd=0 HEARTBEAT)
-#   00 05 01 ff 01 00 01           — switcher ON (attr=0, cmd=5, ctrl=1 SWITCHER)
-#   00 05 02 ff 02 00 <u16le>      — параметр времени (1000 и 60 в captures)
-#   00 05 04 ff 03 <u32le>         — параметр 04 (в captures только 0)
+#   00 05 01 ff 01 00 <on>         — switcher ON/OFF (ctrl=1 SWITCHER)
+#   00 05 02 ff 02 00 <u16le>      — аппаратная яркость (ctrl=2 BRIGHT),
+#                                    dimmer 0..1000 (1000 в captures = max)
+#   00 05 04 ff 03 00 R G B        — статичный цвет (ctrl=4 COLOR)
 #   00 05 05 ff e3 00 4b 00 + 225B — RGB transfer (ctrl=5): 75 LED x RGB,
 #                                    адресация с конца ленты
-#   00 05 06 ff 03 <u32le>         — work mode (ctrl=6): 0, 0x00000101, 0x0000fe01
+#   00 05 06 ff 03 00 <mode> 00 00 — work mode (ctrl=6): 0 = PC
 #
 # LP_CTRL: SWITCHER=1 BRIGHT=2 TEMPER=3 COLOR=4 RGB_TRANSFER=5 WORKMODE=6
 # LP_CMD:  HEARTBEAT=0 FIRM=1 SYNCSTATUS=2 SYNCCONFIG=3 OTA=4
@@ -146,14 +148,21 @@ def sync_on() -> bytes:
     return packet(_DATA_SYNC_ON)
 
 
-def set_timing(ms: int) -> bytes:
-    """00 05 02 ff 02 00 <u16le> — тайминговый параметр (1000 или 60 в captures)."""
-    return packet(b"\x00\x05\x02\xff\x02\x00" + int(ms).to_bytes(2, "little"))
+def brightness(dimmer: int) -> bytes:
+    """
+    00 05 02 ff 02 00 <u16le> — аппаратная яркость (GenBrightPackage).
+
+    dimmer — 0..1000 (оригинал клампит сверху на 1000; в captures 1000 = max).
+    Контроллер умножает этот dimmer на RGB всех входящих режимов.
+    """
+    d = max(0, min(1000, int(dimmer)))
+    return packet(b"\x00\x05\x02\xff\x02\x00" + d.to_bytes(2, "little"))
 
 
-def set_mode04(value: int) -> bytes:
-    """00 05 04 ff 03 <u32le> — параметр 04 (в captures только 0)."""
-    return packet(b"\x00\x05\x04\xff\x03" + int(value).to_bytes(4, "little"))
+def color(r: int, g: int, b: int) -> bytes:
+    """00 05 04 ff 03 00 R G B — статичный цвет (GenColorPackage)."""
+    rgb = bytes(max(0, min(255, int(v))) for v in (r, g, b))
+    return packet(b"\x00\x05\x04\xff\x03\x00" + rgb)
 
 
 def set_work_mode(mode: int) -> bytes:

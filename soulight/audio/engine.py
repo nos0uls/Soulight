@@ -27,6 +27,31 @@ except ImportError:
     SOUNDCARD_AVAILABLE = False
 
 
+def list_capture_devices():
+    """
+    Список источников захвата для UI: [(id, label, is_loopback), ...].
+
+    is_loopback=True — монитор устройства ВЫВОДА (системный звук этого
+    выхода): на Windows это WASAPI loopback, на Linux — PulseAudio/PipeWire
+    monitor source. is_loopback=False — обычный микрофон/вход.
+    Первый элемент всегда None = default microphone.
+    """
+    devices = [(None, "Default Microphone", False)]
+    if not SOUNDCARD_AVAILABLE:
+        return devices
+    try:
+        for mic in sc.all_microphones(include_loopback=True):
+            is_lb = bool(getattr(mic, "isloopback", False))
+            kind = "Output" if is_lb else "Mic"
+            devices.append((mic.id, f"{kind}: {mic.name}", is_lb))
+    except Exception:
+        pass
+    # Loopback-устройства первыми (пользователь обычно хочет звук с выхода)
+    head, tail = devices[:1], devices[1:]
+    tail.sort(key=lambda d: (not d[2], d[1]))
+    return head + tail
+
+
 # Windows-only: инициализация COM в аудио-потоке для WASAPI.
 # Это исправляет -9999 / WdmSyncIoctl при открытии loopback из потока.
 def _init_com_for_thread():
@@ -80,7 +105,7 @@ class AudioEngine(QObject):
             "gain": 1.0,
             "color_shift": 0.0,
         }
-        self._use_loopback = False
+        self._device_id: Optional[str] = None
         self._layout_leds: Optional[list] = None
 
         self._running = False
@@ -123,7 +148,12 @@ class AudioEngine(QObject):
     def set_layout(self, layout_leds: Optional[list]):
         self._layout_leds = layout_leds
 
-    def start(self, mode_name: str, use_loopback: bool = False, params: Optional[dict] = None):
+    def start(self, mode_name: str, device_id: Optional[str] = None, params: Optional[dict] = None):
+        """
+        Запускает захват. device_id — id устройства из list_capture_devices():
+        None = микрофон по умолчанию, иначе конкретный вход или
+        loopback-монитор выбранного устройства вывода.
+        """
         if not SOUNDCARD_AVAILABLE:
             self.error_occurred.emit("soundcard не установлен. Установите: pip install soundcard")
             return
@@ -131,7 +161,7 @@ class AudioEngine(QObject):
             self.stop()
 
         self.set_mode(mode_name, params)
-        self._use_loopback = use_loopback
+        self._device_id = device_id
         self._running = True
         self._stop_event.clear()
 
@@ -163,12 +193,12 @@ class AudioEngine(QObject):
         com_owned = _init_com_for_thread()
         self.status_changed.emit("Capturing...")
         try:
-            if self._use_loopback:
-                # Loopback системного звука (с динамиков)
-                spk = sc.default_speaker()
-                mic = sc.get_microphone(spk.id, include_loopback=True)
+            if self._device_id is not None:
+                # Выбранное устройство: loopback-монитор устройства вывода
+                # или конкретный микрофон — по id из all_microphones().
+                mic = sc.get_microphone(self._device_id, include_loopback=True)
             else:
-                # Обычный микрофон
+                # Микрофон по умолчанию
                 mic = sc.default_microphone()
 
             with mic.recorder(samplerate=self._sample_rate, channels=1, blocksize=self._block_size) as recorder:
