@@ -8,6 +8,7 @@ import ctypes
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -147,8 +148,8 @@ class ScreenCapturer:
         # процесса — см. install_desktop.sh (python-soulight shim).
         self._kwin_iface = None
         self._kwin_bus = None
-        self._kwin_checked = False
-        self._kwin_failed = False
+        self._kwin_fail_count = 0
+        self._kwin_disabled_until = 0.0  # backoff после серии ошибок
         # Эти счётчики нужны только для диагностики.
         # Мы логируем первые удачные вызовы и любые ошибки,
         # чтобы потом было проще понять, где ломается capture lifecycle.
@@ -307,17 +308,26 @@ class ScreenCapturer:
         # Wayland: mss видит только XWayland-слой (чёрный кадр) —
         # пробуем KWin ScreenShot2, если он доступен и процесс
         # авторизован (desktop-файл с X-KDE-DBUS-Restricted-Interfaces).
-        if _is_wayland() and sys.platform != "win32" and not self._kwin_failed:
+        # Отключаем только после серии ошибок подряд и с backoff — разовый
+        # хик KWin (lock screen, D-Bus timeout) не должен навсегда
+        # отправлять нас в чёрный mss-кадр.
+        if (_is_wayland() and sys.platform != "win32"
+                and time.monotonic() >= self._kwin_disabled_until):
             try:
-                return self._capture_edges_kwin(edge_depth)
+                frame = self._capture_edges_kwin(edge_depth)
+                self._kwin_fail_count = 0
+                return frame
             except Exception as e:
-                self._kwin_failed = True
-                self._debug_log(
-                    "kwin-unavailable",
-                    f"KWin capture failed ({type(e).__name__}: {e}); "
-                    "mss на Wayland возвращает чёрный кадр — для mirroring "
-                    "запустите приложение через ./install_desktop.sh ярлык",
-                )
+                self._kwin_fail_count += 1
+                if self._kwin_fail_count >= 3:
+                    self._kwin_disabled_until = time.monotonic() + 30.0
+                    self._debug_log(
+                        "kwin-unavailable",
+                        f"KWin capture failed x{self._kwin_fail_count} "
+                        f"({type(e).__name__}: {e}); fallback на mss 30с — "
+                        "на Wayland это чёрный кадр: для mirroring запустите "
+                        "приложение через ./install_desktop.sh ярлык",
+                    )
 
         # MSS fallback path
         return self._capture_edges_mss(edge_depth)

@@ -185,12 +185,14 @@ def main(argv=None):
             args.mode = "scene"
             args.pattern = st.get("scene_pattern", "rainbow")
             args.speed = st.get("scene_speed", 1.0)
-            args.full_led = args.full_led or bool(st.get("scene_full_led", False))
+            args.full_led = args.full_led or bool(st.get("scene_full_led", True))
         elif mode == "audio":
             args.mode = "audio"
             args.audio_mode = st.get("audio_mode", "spectrum")
+            args.fps = float(st.get("audio_fps", args.fps))
             args.device = args.device or st.get("audio_device")
-            args.full_led = args.full_led or bool(st.get("audio_full_led", False))
+            # GUI по умолчанию считает full_led включённым — выравниваем.
+            args.full_led = args.full_led or bool(st.get("audio_full_led", True))
         elif mode == "off":
             args.mode = "off"
         else:
@@ -201,7 +203,21 @@ def main(argv=None):
         args.auto_brightness = args.auto_brightness or st.get("auto_enabled", False)
         print(f"[headless] restore: mode={args.mode}")
 
+    # Сохранённое аудио-устройство могло исчезнуть (USB, переименование)
+    # — падаем обратно на дефолт, а не в ошибку захвата.
+    if args.mode == "audio" and args.device is not None:
+        try:
+            from soulight.audio.engine import list_capture_devices
+            known = {d for d, _l, _b in list_capture_devices()}
+            if args.device not in known:
+                print(f"[headless] saved audio device {args.device!r} "
+                      "not found — falling back to default", file=sys.stderr)
+                args.device = None
+        except Exception:
+            pass  # энумерация недоступна — engine сам сообщит об ошибке
+
     config = LEDConfig()
+    config.load()
     driver = LEDDriver(port=args.port) if args.port else LEDDriver()
     driver.set_brightness(args.brightness)
 

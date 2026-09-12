@@ -365,6 +365,8 @@ class MainWindow(QMainWindow):
         # Вкладка 2: LED Config
         self._led_config_panel = LEDConfigPanel()
         self._led_config_panel.config_confirmed.connect(self._on_led_config_confirmed)
+        self._led_config_panel.preview_requested.connect(self._on_led_config_preview)
+        self._led_config_panel.live_preview_changed.connect(self._on_live_preview_toggled)
         self._tabs.addTab(self._led_config_panel, "LED Config")
 
         # Вкладка 3: Screen Mirror
@@ -530,12 +532,21 @@ class MainWindow(QMainWindow):
         self._btn_on = QPushButton("LED ON")
         self._btn_on.setFixedHeight(36)
         self._btn_on.setStyleSheet("background-color: #2d8c2d; color: white; font-weight: bold; border-radius: 6px;")
+        self._btn_on.setToolTip(
+            "Hardware-выключатель ленты: OFF — реальное выключение "
+            "на контроллере, движок продолжает писать кадры. "
+            "ON возвращает вывод."
+        )
         self._btn_on.clicked.connect(lambda: self._driver.switch(True))
         onoff_layout.addWidget(self._btn_on)
 
         self._btn_off = QPushButton("LED OFF")
         self._btn_off.setFixedHeight(36)
         self._btn_off.setStyleSheet("background-color: #cc3333; color: white; font-weight: bold; border-radius: 6px;")
+        self._btn_off.setToolTip(
+            "Выключает вывод ленты на уровне контроллера "
+            "(движок продолжает работать — см. Stop внизу)."
+        )
         self._btn_off.clicked.connect(lambda: self._driver.switch(False))
         onoff_layout.addWidget(self._btn_off)
         layout.addLayout(onoff_layout)
@@ -583,6 +594,14 @@ class MainWindow(QMainWindow):
             self._on_mirror_monitor_changed
         )
         monitor_row.addWidget(self._mirror_monitor_combo, stretch=1)
+        # На Wayland захват идёт через KWin CaptureActiveScreen —
+        # индекс монитора игнорируется, захватывается активный экран.
+        from soulight.screen_mirroring.screen_capture import _is_wayland
+        if _is_wayland():
+            self._mirror_monitor_combo.setEnabled(False)
+            self._mirror_monitor_combo.setToolTip(
+                "На Wayland захватывается активный экран (KWin)"
+            )
         btn_refresh = QPushButton("Refresh")
         btn_refresh.clicked.connect(self._populate_monitor_combo)
         monitor_row.addWidget(btn_refresh)
@@ -598,7 +617,9 @@ class MainWindow(QMainWindow):
         self._mirror_preset_combo.addItem("Custom", "custom")
         for preset_key, preset in MIRROR_PRESETS.items():
             self._mirror_preset_combo.addItem(preset["label"], preset_key)
-        self._mirror_preset_combo.setCurrentIndex(2)
+        # Дефолт — Custom: реальные значения слайдеров,
+        # чтобы combo не обещал пресет, который не применён.
+        self._mirror_preset_combo.setCurrentIndex(0)
         self._mirror_preset_combo.currentIndexChanged.connect(self._on_mirror_preset_changed)
         preset_layout.addWidget(self._mirror_preset_combo, stretch=1)
         layout.addWidget(preset_group)
@@ -863,9 +884,11 @@ class MainWindow(QMainWindow):
         )
 
     def _rebuild_mirror_engine(self):
-        """Собирает snapshot текущих mirroring-настроек для worker thread."""
+        """Собирает snapshot текущих mirroring-настроек для worker thread.
+        Конфиг копируем — виджет может мутировать его во время работы worker."""
+        import copy
         return {
-            "config": self._led_config_panel.config,
+            "config": copy.deepcopy(self._led_config_panel.config),
             "monitor_index": self._mirror_monitor_index(),
             "edge_fraction": self._mirror_edge_fraction(),
             "smoothing_factor": self._mirror_smoothing_factor(),
@@ -881,7 +904,9 @@ class MainWindow(QMainWindow):
         if not self._screen_mirroring_active:
             return
         self._stop_screen_mirroring(restore_output=False)
-        self._start_screen_mirroring()
+        # clear_output=False — не гасим ленту между stop/start,
+        # иначе каждый debounce-restart даёт чёрную вспышку.
+        self._start_screen_mirroring(clear_output=False)
 
     def _queue_mirror_restart(self):
         """
@@ -897,8 +922,9 @@ class MainWindow(QMainWindow):
         """
         Отправляет на ленту preview раскладки из LED Config.
         Цвет каждой стороны берётся из SIDE_COLORS, выключенные LED — чёрные.
+        Preview не должен перебивать работающий режим.
         """
-        if not self._driver.connected:
+        if not self._driver.connected or self._active_mode is not None:
             return
 
         cfg = self._led_config_panel.config
@@ -913,15 +939,26 @@ class MainWindow(QMainWindow):
                 colors[led.physical_index] = SIDE_COLORS.get(led.side, (255, 255, 255))
         self._driver.set_per_led_colors(colors)
 
-    def _start_screen_mirroring(self):
+    def _start_screen_mirroring(self, clear_output=True):
         """
         Запускает screen mirroring: создаёт engine, background thread, таймер.
         Capture + sampling выполняются в отдельном потоке через MirrorWorker,
         чтобы UI оставался отзывчивым.
+        clear_output=False при restart — сохраняем последний кадр,
+        чтобы лента не моргала чёрным между rebuild'ами.
         """
         if not self._driver.connected:
             QMessageBox.warning(self, "Not connected",
                                 "Connect to the controller first.")
+            return
+        cfg = self._led_config_panel.config
+        if cfg.total + cfg.start_offset > MAX_LEDS:
+            QMessageBox.warning(
+                self, "Invalid LED config",
+                f"Total LEDs ({cfg.total}) + offset ({cfg.start_offset}) "
+                f"exceeds hardware limit ({MAX_LEDS}).\n"
+                "Исправьте раскладку на вкладке LED Config."
+            )
             return
         self._stop_all_modes()
         # Создаём background thread и worker
@@ -943,8 +980,10 @@ class MainWindow(QMainWindow):
         focus_widget = self.focusWidget()
         if focus_widget is not None:
             focus_widget.clearFocus()
-        # Убираем solid color, чтобы per-LED не конфликтовал
-        self._driver.set_color(0, 0, 0)
+        # Убираем solid color, чтобы per-LED не конфликтовал.
+        # При restart пропускаем — лента держит последний кадр без вспышки.
+        if clear_output:
+            self._driver.set_color(0, 0, 0)
         # Hardware dimmer — из основного слайдера (mirror-слайдер ему синхронен).
         self._driver.set_brightness(self._slider_bright.value())
         self._screen_mirror_timer.start(self._mirror_interval_ms())
@@ -966,15 +1005,38 @@ class MainWindow(QMainWindow):
         self._screen_mirror_timer.stop()
         self._screen_mirroring_active = False
 
-        # Останавливаем background thread
-        if self._mirror_thread is not None:
-            if self._mirror_worker is not None:
-                self.mirror_shutdown_requested.emit()
-            self._mirror_thread.quit()
-            self._mirror_thread.wait(2000)
-            self._mirror_thread = None
+        worker = self._mirror_worker
+        thread = self._mirror_thread
         self._mirror_worker = None
+        self._mirror_thread = None
         self._mirror_frame_pending = False
+
+        if worker is not None:
+            # Отвязываем worker от UI-слотов до остановки потока —
+            # его поздние кадры/ошибки не должны добивать новый engine.
+            try:
+                worker.frame_ready.disconnect(self._on_mirror_frame_ready)
+                worker.error_occurred.disconnect(self._on_mirror_error)
+            except (TypeError, RuntimeError):
+                pass
+            self.mirror_shutdown_requested.emit()
+
+        if thread is not None:
+            thread.quit()
+            if thread.wait(2000):
+                # Поток завершился — queued shutdown мог не доставиться
+                # (event loop уже вышел). Освобождаем ресурсы напрямую,
+                # это безопасно: поток мёртв, гонки с capture нет.
+                if worker is not None:
+                    try:
+                        worker.shutdown()
+                    except RuntimeError:
+                        pass
+            else:
+                # Поток не уложился в 2с — не теряем его: worker уже
+                # отвязан от UI-сигналов, поток удалится по finished.
+                self._debug_log_mirror("mirror thread did not stop in 2s")
+
         self._update_mirror_status("Idle")
         if restore_output:
             self._mode_stopped("mirror")
@@ -992,11 +1054,18 @@ class MainWindow(QMainWindow):
         # queued signal-slot гарантирует выполнение process_frame в worker thread
         self.mirror_frame_requested.emit()
 
+    def _debug_log_mirror(self, msg):
+        print(f"[mirror] {msg}")
+
     def _on_mirror_frame_ready(self, physical_colors):
         """
         Slot: вызывается из worker thread когда кадр готов.
         Отправляет цвета в LED driver (быстро, не блокирует UI).
         """
+        # Игнорируем кадры от старого worker'а — после restart они
+        # относятся к предыдущей раскладке и могут прийти с задержкой.
+        if self.sender() is not self._mirror_worker:
+            return
         self._mirror_frame_pending = False
         if not self._screen_mirroring_active:
             return
@@ -1004,6 +1073,9 @@ class MainWindow(QMainWindow):
 
     def _on_mirror_error(self, error_msg):
         """Slot: worker поймал ошибку при capture/sample."""
+        # Ошибка от уже остановленного worker'а не должна убивать новый.
+        if self.sender() is not self._mirror_worker:
+            return
         self._mirror_frame_pending = False
         self._stop_screen_mirroring(restore_output=True)
         self._update_mirror_status(f"Error: {error_msg}", "#f38ba8")
@@ -1069,6 +1141,7 @@ class MainWindow(QMainWindow):
                 f"Running · {self._mirror_effective_fps()} FPS effective",
                 "#2d8c2d",
             )
+            self._update_mode_status()
 
     def _on_mirror_preset_changed(self, index):
         """Применяет выбранный preset или оставляет ручной режим Custom."""
@@ -1140,9 +1213,27 @@ class MainWindow(QMainWindow):
         self._btn_mode_start.setEnabled(
             self._driver.connected and self._current_tab in self._MODE_TABS
         )
-        self._btn_mode_stop.setEnabled(
-            self._driver.connected and self._active_mode is not None
-        )
+        # Stop активен когда есть что остановить — движок может жить
+        # при временно отвалившемся serial.
+        self._btn_mode_stop.setEnabled(self._active_mode is not None)
+        # LED ON/OFF — hardware-выключатель, только при подключении.
+        if hasattr(self, "_btn_on"):
+            self._btn_on.setEnabled(self._driver.connected)
+            self._btn_off.setEnabled(self._driver.connected)
+        self._sync_cam_pause_button()
+
+    def _sync_cam_pause_button(self):
+        """Cam ⏸ имеет смысл только когда автояркость с камерой включена."""
+        btn = getattr(self, "_btn_cam_pause", None)
+        amb = getattr(self, "_auto_ambient_cb", None)
+        auto = getattr(self, "_auto_enable_cb", None)
+        if btn is None or amb is None or auto is None:
+            return
+        cam_ok = auto.isChecked() and amb.isChecked() and CV2_AVAILABLE
+        if not cam_ok and btn.isChecked():
+            # Отпускаем паузу, чтобы она не зависла невидимой.
+            btn.setChecked(False)
+        btn.setEnabled(cam_ok)
 
     def _on_mode_start(self):
         """(Re)Start: запускает режим открытой вкладки."""
@@ -1150,11 +1241,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Not connected",
                                 "Connect to the controller first.")
             return
+        # Если лента выключена кнопкой LED OFF — возвращаем вывод,
+        # иначе запущенный режим останется тёмным.
+        self._driver.switch(True)
         tab = self._current_tab
         if tab == 0:
             self._stop_all_modes()
             self._active_mode = "color"
-            # Сохранит preset + last_mode и отправит цвет на ленту.
+            self._save_mode("color")
+            # Сохранит preset и отправит цвет на ленту.
             self._send_current_color()
         elif tab == 2:
             self._start_screen_mirroring()
@@ -1169,12 +1264,16 @@ class MainWindow(QMainWindow):
         """Stop: останавливает активный режим, лента гаснет."""
         self._stop_all_modes()
         self._active_mode = None
+        self._save_mode("off")
         if self._driver.connected:
             self._driver.set_color(0, 0, 0)
         self._update_mode_status()
 
     def _stop_all_modes(self):
-        """Останавливает все динамические режимы без восстановления цвета."""
+        """Останавливает все динамические режимы без восстановления цвета.
+        Сначала сбрасываем _active_mode — тогда _mode_stopped внутри
+        stop-путей не шлёт промежуточный чёрный кадр при переключении."""
+        self._active_mode = None
         self._stop_screen_mirroring(restore_output=False)
         self._stop_scenes()
         self._stop_audio()
@@ -1196,19 +1295,35 @@ class MainWindow(QMainWindow):
         # setValue триггерит _on_slider_changed → preview + preset save.
         # Если активен режим Color — цвет уйдёт на ленту сразу.
 
+    def _on_led_config_preview(self):
+        """Live Preview из LED Config — только когда нет активного режима."""
+        self._send_led_config_preview()
+
+    def _on_live_preview_toggled(self, enabled: bool):
+        """При выключении Live Preview возвращаем ленте статичный цвет,
+        если никакой режим не запущен (preview-кадр иначе застрянет)."""
+        if (not enabled and self._active_mode is None
+                and self._driver.connected):
+            self._driver.set_color(self._r, self._g, self._b)
+
     def _on_led_config_confirmed(self):
         """
-        Вызывается при нажатии Confirm в LED Config.
-        Сохраняет конфиг. Если mirroring активен — перестраивает layout.
+        Confirm/Reset в LED Config: конфиг уже сохранён виджетом.
+        Пере-применяем раскладку к работающим движкам; активный режим
+        preview'ем не перебиваем.
         """
         cfg = self._led_config_panel.config
         print(f"[UI] LED config saved: {cfg.total} LEDs")
-        cfg.save()
 
-        if not self._driver.connected:
-            return
+        # Работающие scene/audio движки — новый count + маска монитора.
+        if self._scene_active and self._scene_engine is not None:
+            self._apply_full_led(self._scene_engine,
+                                 self._scene_full_led_cb.isChecked())
+        if self._audio_active and self._audio_engine is not None:
+            self._apply_full_led(self._audio_engine,
+                                 self._audio_full_led_cb.isChecked())
 
-        # Если mirroring активен — пересобираем engine с новым конфигом
+        # Mirroring — пересобираем engine с новым конфигом (без вспышки).
         if self._screen_mirroring_active:
             try:
                 self._queue_mirror_restart()
@@ -1216,13 +1331,9 @@ class MainWindow(QMainWindow):
                 pass
             return
 
-        # На LED Config вкладке показываем живой preview раскладки.
-        if self._current_tab == 1:
+        # Режима нет — показываем раскладку на ленте как preview.
+        if self._active_mode is None:
             self._send_led_config_preview()
-            return
-
-        # Иначе гасим ленту (до выхода из LED Config)
-        self._driver.set_color(0, 0, 0)
 
     def _make_slider(self, name, initial, callback):
         """Создаёт горизонтальный слайдер 0-255 с label значения."""
@@ -1262,9 +1373,10 @@ class MainWindow(QMainWindow):
     def _on_brightness_changed(self, value):
         """Изменилась мастер-яркость."""
         self._label_bright.setText(str(value))
-        # Сохраняем preset
+        # Сохраняем preset + settings (headless --restore читает settings)
         self._color_preset.set_brightness(value)
         self._color_preset.save()
+        self._settings.set("brightness", value)
         # Всегда синхронизируем яркость в драйвер.
         self._driver.set_brightness(value)
         # Ручное изменение ставит автояркость на паузу
@@ -1307,7 +1419,13 @@ class MainWindow(QMainWindow):
         """Выполняет подключение (вызывается из таймера для обновления UI)."""
         if is_auto:
             self._auto_connect_attempt += 1
-        ok = self._driver.connect()
+        try:
+            ok = self._driver.connect()
+        except Exception as e:
+            # Исключение в connect (serial/bridge) не должно ронять
+            # слот таймера — считаем это неудачной попыткой.
+            print(f"[connect] {type(e).__name__}: {e}")
+            ok = False
         if ok:
             self._is_auto_connecting = False
             self._status_label.setText("Connected")
@@ -1335,6 +1453,7 @@ class MainWindow(QMainWindow):
             self._status_label.setText("Connection failed")
             self._status_label.setStyleSheet("color: #cc3333; font-weight: bold;")
             self._btn_connect.setEnabled(True)
+            self._update_mode_status()
             if is_auto:
                 QMessageBox.warning(
                     self,
@@ -1391,15 +1510,20 @@ class MainWindow(QMainWindow):
 
     def _send_current_color(self):
         """
-        Сохраняет текущий цвет в preset; отправляет на ленту только
-        когда активен режим Color (запускается общей кнопкой (Re)Start).
+        Сохраняет текущий цвет в preset и app settings; отправляет на ленту
+        только когда активен режим Color (запускается общей кнопкой (Re)Start).
+        last_color синхронизируем всегда — иначе headless --restore поднимет
+        устаревший цвет после выбора цвета под активным другим режимом.
         """
         self._color_preset.set_color(self._r, self._g, self._b)
         self._color_preset.save()
+        self._settings.update(
+            last_color=[self._r, self._g, self._b],
+            brightness=self._slider_bright.value(),
+        )
         if self._driver.connected and self._active_mode == "color":
             self._driver.set_color(self._r, self._g, self._b)
-            self._save_mode("color", last_color=[self._r, self._g, self._b],
-                            brightness=self._slider_bright.value())
+            self._update_mode_status()
 
     # endregion
 
@@ -1467,13 +1591,19 @@ class MainWindow(QMainWindow):
         self._update_mode_status()
 
     def _apply_full_led(self, engine, checked: bool):
-        """Live-переключение Full LED: число LED + маска монитора."""
-        engine.set_led_count(self._mode_led_count(checked))
-        if checked:
-            engine.set_layout(None)
-        else:
+        """Live-переключение Full LED: число LED + маска монитора
+        применяются атомарно, чтобы ни один кадр не ушёл в
+        рассогласованной конфигурации."""
+        count = self._mode_led_count(checked)
+        leds = None
+        if not checked:
             layout_data = build_layout(self._led_config_panel.config, 100, 100, 0.08)
-            engine.set_layout(layout_data.leds)
+            leds = layout_data.leds
+        if hasattr(engine, "set_output_config"):
+            engine.set_output_config(led_count=count, layout_leds=leds)
+        else:
+            engine.set_led_count(count)
+            engine.set_layout(leds)
 
     def _on_scene_full_led_toggled(self, checked: bool):
         self._settings.update(scene_full_led=checked)
@@ -1499,10 +1629,14 @@ class MainWindow(QMainWindow):
             layout_data = build_layout(self._led_config_panel.config, 100, 100, 0.08)
             self._scene_engine.set_layout(layout_data.leds)
 
-        self._scene_engine.moveToThread(self._scene_thread)
-        self._scene_engine.frame_ready.connect(self._on_scene_frame_ready)
-        self._scene_engine.error_occurred.connect(self._on_scene_error)
-        self._scene_thread.started.connect(lambda: self._scene_engine.start(pattern_name))
+        engine = self._scene_engine
+        engine.moveToThread(self._scene_thread)
+        engine.frame_ready.connect(self._on_scene_frame_ready)
+        engine.error_occurred.connect(self._on_scene_error)
+        # Захватываем engine локально: если stop/старт успеет заменить
+        # self._scene_engine до срабатывания started, старый engine
+        # всё равно получит свой start (и будет остановлен при cleanup).
+        self._scene_thread.started.connect(lambda: engine.start(pattern_name))
         self._scene_thread.start()
         self._scene_active = True
         self._active_mode = "scene"
@@ -1532,21 +1666,31 @@ class MainWindow(QMainWindow):
 
     def _mode_stopped(self, mode: str):
         """Режим завершился (стоп или ошибка): сбрасываем _active_mode
-        и статус, лента гаснет — иначе она замораживается на последнем кадре."""
-        if self._active_mode == mode:
-            self._active_mode = None
+        и гасим ленту — иначе она замораживается на последнем кадре.
+        Чёрное шлём только если остановлен именно текущий режим —
+        при переключении режимов _stop_all_modes уже сбросил _active_mode,
+        и промежуточная вспышка чёрного не нужна."""
+        if self._active_mode != mode:
+            return
+        self._active_mode = None
         if self._driver.connected:
             self._driver.set_color(0, 0, 0)
         self._update_mode_status()
 
     def _on_scene_frame_ready(self, colors):
+        if self.sender() is not self._scene_engine:
+            return
         if self._scene_active and self._driver.connected:
             self._driver.set_per_led_colors(colors)
 
     def _on_scene_error(self, msg):
+        if self.sender() is not self._scene_engine:
+            return
+        # Сначала стопаем (статус "Idle"), потом показываем ошибку —
+        # иначе _stop_scenes затирает текст.
+        self._stop_scenes()
         self._scene_status_label.setText(f"Error: {msg}")
         self._scene_status_label.setStyleSheet("color: #f38ba8; font-weight: bold;")
-        self._stop_scenes()
 
     # endregion
 
@@ -1733,11 +1877,12 @@ class MainWindow(QMainWindow):
             layout_data = build_layout(self._led_config_panel.config, 100, 100, 0.08)
             self._audio_engine.set_layout(layout_data.leds)
 
-        self._audio_engine.moveToThread(self._audio_thread)
-        self._audio_engine.frame_ready.connect(self._on_audio_frame_ready)
-        self._audio_engine.error_occurred.connect(self._on_audio_error)
-        self._audio_engine.status_changed.connect(self._on_audio_status_changed)
-        self._audio_thread.started.connect(lambda: self._audio_engine.start(mode_name, device_id=device_id))
+        engine = self._audio_engine
+        engine.moveToThread(self._audio_thread)
+        engine.frame_ready.connect(self._on_audio_frame_ready)
+        engine.error_occurred.connect(self._on_audio_error)
+        engine.status_changed.connect(self._on_audio_status_changed)
+        self._audio_thread.started.connect(lambda: engine.start(mode_name, device_id=device_id))
         self._audio_thread.start()
         self._audio_active = True
         self._active_mode = "audio"
@@ -1770,10 +1915,14 @@ class MainWindow(QMainWindow):
             self._mode_stopped("audio")
 
     def _on_audio_frame_ready(self, colors):
+        if self.sender() is not self._audio_engine:
+            return
         if self._audio_active and self._driver.connected:
             self._driver.set_per_led_colors(colors)
 
     def _on_audio_error(self, msg):
+        if self.sender() is not self._audio_engine:
+            return
         self._audio_error_msg = f"Error: {msg}"
         self._audio_status_label.setText(self._audio_error_msg)
         self._audio_status_label.setStyleSheet("color: #f38ba8; font-weight: bold;")
@@ -1783,6 +1932,8 @@ class MainWindow(QMainWindow):
         self._audio_status_label.setStyleSheet("color: #f38ba8; font-weight: bold;")
 
     def _on_audio_status_changed(self, status):
+        if self.sender() is not self._audio_engine:
+            return
         # "Running" / "Capturing..." / "Stopped" / "Error"
         if status in ("Running", "Capturing..."):
             self._audio_error_msg = None
@@ -1945,10 +2096,12 @@ class MainWindow(QMainWindow):
             if self._driver.connected:
                 self._driver.set_temperature(0.0)
                 self._driver.set_brightness(self._slider_bright.value())
+        self._sync_cam_pause_button()
 
     def _on_auto_param_changed(self, *args):
         """Сохраняет параметры и передаёт их в сервис."""
         self._apply_auto_params()
+        self._sync_cam_pause_button()
 
     def _apply_auto_params(self):
         """UI → settings → service params."""
@@ -2030,6 +2183,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """При закрытии окна останавливаем mirroring, scenes, audio и отключаемся."""
+        # Флашим отложенный debounce-цвет — иначе последний выбор
+        # пользователя может не сохраниться.
+        self._send_timer.stop()
+        self._send_current_color()
         self._stop_screen_mirroring(restore_output=False)
         self._stop_scenes()
         self._stop_audio()

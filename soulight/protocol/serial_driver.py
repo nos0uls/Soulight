@@ -46,7 +46,7 @@ MIRROR_FPS_SAFETY_MARGIN = 0.98
 
 
 def _clamp_ch(v: float) -> int:
-    return max(0, min(255, int(v)))
+    return max(0, min(255, int(round(v))))
 
 
 class LEDDriver:
@@ -102,6 +102,10 @@ class LEDDriver:
         # Применяется в send-loop при сборке пакета, не портит исходный буфер.
         self._temp_rgb = (1.0, 1.0, 1.0)
         self._target_temp_rgb = (1.0, 1.0, 1.0)
+        # Вывод включён/выключен (команда switch). False → send-loop шлёт
+        # только heartbeat — иначе поток color/RGB пакетов мгновенно
+        # переключает ленту обратно и Off визуально не работает.
+        self._output_on = True
         # Интервал между пакетами в секундах
         # 15ms позволяет отсылать до 66 пакетов в секунду (честные 60 FPS для mirroring)
         self._send_interval = 0.015
@@ -170,13 +174,20 @@ class LEDDriver:
             print("[Driver] Bridge инициализация провалилась")
             return False
 
-        # Открываем serial порт
+        # Открываем serial порт. На POSIX просим exclusive доступ
+        # (TIOCEXCL): без него вторая копия Soulight (например, headless
+        # при запущенном GUI) открывает тот же порт и оба процесса пишут
+        # пакеты попеременно — лента мерцает между двумя потоками кадров.
+        open_kwargs = {}
+        if sys.platform != "win32":
+            open_kwargs["exclusive"] = True
         try:
             self._serial = serial.Serial(
                 port=self._port_name,
                 baudrate=self._baud,
                 timeout=0.1,
                 write_timeout=0.5,
+                **open_kwargs,
             )
             # DTR и RTS нужны для пробуждения контроллера
             self._serial.dtr = True
@@ -196,12 +207,18 @@ class LEDDriver:
         # Яркость плавно доедет до _target_brightness (fade-in ~0.3s).
         self._brightness = 0.0
 
-        # Запускаем background send loop (brightness + color + heartbeat)
-        self._send_stop.clear()
-        self._send_thread = threading.Thread(target=self._send_loop, daemon=True)
-        self._send_thread.start()
-
+        # _connected поднимаем до старта потока — иначе set_* в этом окне
+        # молча дропаются.
         self._connected = True
+
+        # Запускаем background send loop (brightness + color + heartbeat)
+        if self._send_thread is not None and self._send_thread.is_alive():
+            # Старый поток завис и не умер — не плодим второй sender.
+            print("[Driver] старый send thread ещё жив — переиспользуем")
+        else:
+            self._send_stop.clear()
+            self._send_thread = threading.Thread(target=self._send_loop, daemon=True)
+            self._send_thread.start()
         print(f"[Driver] Подключено к {self._port_name}")
         return True
 
@@ -212,10 +229,15 @@ class LEDDriver:
         if not self._connected:
             return
 
-        # Останавливаем send thread
+        # Останавливаем send thread. Если поток завис (write blocked),
+        # флаг остаётся выставленным — иначе следующий connect() очистит
+        # его и оживит второй send-loop параллельно с новым.
         self._send_stop.set()
         if self._send_thread is not None:
             self._send_thread.join(timeout=2.0)
+            if self._send_thread.is_alive():
+                print("[Driver] send thread не остановился — "
+                      "флаг stop остаётся активным")
 
         # Выключаем ленту
         pkt = self._bridge.make_switch_packet(False)
@@ -240,6 +262,15 @@ class LEDDriver:
         """
         if not self._connected:
             return
+        # Уходим из per-LED режима: текущий solid-цвет протух (его ставили
+        # до старта режима), поэтому фейд начинаем от усреднённого цвета
+        # последнего кадра — иначе будет вспышка старого цвета.
+        if self._current_per_led:
+            n = len(self._current_per_led)
+            ar = sum(c[0] for c in self._current_per_led) / n
+            ag = sum(c[1] for c in self._current_per_led) / n
+            ab = sum(c[2] for c in self._current_per_led) / n
+            self._current_color = (ar, ag, ab)
         self._current_per_led = None
         self._target_color = (float(r), float(g), float(b))
         if self._current_color is None:
@@ -253,7 +284,11 @@ class LEDDriver:
         """
         if not self._connected:
             return
-        self._current_per_led = list(colors_rgb)
+        try:
+            buf = [(int(r), int(g), int(b)) for r, g, b in colors_rgb]
+        except (TypeError, ValueError):
+            return  # кривой кадр не должен убивать send-loop
+        self._current_per_led = buf
         self._per_led_version += 1
 
     def set_brightness(self, value):
@@ -276,12 +311,15 @@ class LEDDriver:
         """Включает (True) или выключает (False) ленту."""
         if not self._connected:
             return
+        self._output_on = bool(on)
         pkt = self._bridge.make_switch_packet(on)
         self._safe_write(pkt)
 
     def set_send_interval(self, interval: float):
-        """Публичный setter для интервала между пакетами (seconds)."""
-        self._send_interval = max(0.001, float(interval))
+        """Публичный setter для интервала между пакетами (seconds).
+        Пол <5мс — 240-байтный RGB-кадр при 500kbaud физически не уходит
+        быстрее ~4-5мс, ниже только упираемся в write_timeout."""
+        self._send_interval = max(0.005, float(interval))
 
     # === Внутренние методы ===
 
@@ -362,101 +400,125 @@ class LEDDriver:
         last_temp = None        # температура, при которой шёл последний кадр
 
         while not self._send_stop.is_set():
-            # Плавные переходы: яркость, цвет и температура лерпятся к целям
-            # (~0.3s). Диммер-пакет уходит при смене wire-значения.
-            self._brightness = self._lerp_step(self._brightness, self._target_brightness)
-            if abs(self._brightness - self._target_brightness) < 0.4:
-                self._brightness = float(self._target_brightness)
-            tr, tg, tb = self._temp_rgb
-            tt = self._target_temp_rgb
-            self._temp_rgb = (
-                self._lerp_step(tr, tt[0]),
-                self._lerp_step(tg, tt[1]),
-                self._lerp_step(tb, tt[2]),
-            )
+            try:
+                # Плавные переходы: яркость, цвет и температура лерпятся
+                # к целям (~0.3s). Диммер-пакет уходит при смене wire-значения.
+                self._brightness = self._lerp_step(self._brightness, self._target_brightness)
+                if abs(self._brightness - self._target_brightness) < 0.4:
+                    self._brightness = float(self._target_brightness)
+                tr, tg, tb = self._temp_rgb
+                tt = self._target_temp_rgb
+                # Snap при сходимости — иначе лерп асимптотически вязнет на
+                # 0.9999… и per-led кадры вечно идут через scaled-ветку.
+                def _temp_step(c, t):
+                    v = self._lerp_step(c, t)
+                    return t if abs(v - t) < 1e-3 else v
+                self._temp_rgb = (
+                    _temp_step(tr, tt[0]),
+                    _temp_step(tg, tt[1]),
+                    _temp_step(tb, tt[2]),
+                )
 
-            # Версию читаем ДО списка: если producer обновит буфер между
-            # чтениями, мы отправим новый список под старой версией и просто
-            # пошлём его ещё раз — а не пропустим свежий кадр.
-            version = self._per_led_version
-            per_led = self._current_per_led
-            color = self._current_color
-            temp = self._temp_rgb
-
-            # Определяем текущий режим и сбрасываем счётчик при смене,
-            # чтобы heartbeat не дрейфовал между per_led/solid/none.
-            current_mode = "per_led" if per_led is not None else ("solid" if color is not None else "idle")
-            if current_mode != last_mode:
-                count = 0
-                last_mode = current_mode
-                last_sent_version = -1
-
-            # Динамически отсылаем яркость при любом изменении (даже в per_led режиме)
-            dimmer = self._hw_dimmer()
-            if dimmer != last_dimmer:
-                bright_pkt = self._bridge.make_bright_packet(dimmer)
-                self._safe_write(bright_pkt)
-                self._send_stop.wait(0.005)
-                last_dimmer = dimmer
-
-            if per_led is not None:
-                # Шлём RGB transfer только при новом кадре (версия сменилась)
-                # или смене температуры; периодический resend каждые ~40
-                # итераций — страховка от потерянных пакетов, heartbeat
-                # держит соединение.
-                if version != last_sent_version or temp != last_temp or count % 40 == 0:
-                    if temp != (1.0, 1.0, 1.0):
-                        scaled = [(_clamp_ch(r * temp[0]), _clamp_ch(g * temp[1]), _clamp_ch(b * temp[2]))
-                                  for r, g, b in per_led]
-                        rgb_pkt = self._bridge.make_rgb_transfer_packet(scaled)
-                    else:
-                        rgb_pkt = self._bridge.make_rgb_transfer_packet(per_led)
-                    self._safe_write(rgb_pkt)
-                    last_sent_version = version
-                    last_temp = temp
-                count += 1
-
-                if count % self._hb_every == 0:
+                if not self._output_on:
+                    # Лента выключена switch(False) — только heartbeat.
+                    # Data-пакеты снова включили бы вывод, Off не работал бы.
                     self._safe_write(hb)
+                    self._send_stop.wait(0.5)
+                    continue
 
-                self._send_stop.wait(self._send_interval)
+                # Версию читаем ДО списка: если producer обновит буфер между
+                # чтениями, мы отправим новый список под старой версией и просто
+                # пошлём его ещё раз — а не пропустим свежий кадр.
+                version = self._per_led_version
+                per_led = self._current_per_led
+                color = self._current_color
+                temp = self._temp_rgb
 
-            elif color is not None:
-                # Плавный переход цвета: лерпим к цели, snap при сходимости.
-                tgt = self._target_color
-                if tgt is not None:
-                    nr = self._lerp_step(color[0], tgt[0])
-                    ng = self._lerp_step(color[1], tgt[1])
-                    nb = self._lerp_step(color[2], tgt[2])
-                    if abs(nr - tgt[0]) < 0.6 and abs(ng - tgt[1]) < 0.6 and abs(nb - tgt[2]) < 0.6:
-                        nr, ng, nb = tgt
-                    self._current_color = (nr, ng, nb)
-                    color = self._current_color
+                # Определяем текущий режим и сбрасываем счётчик при смене,
+                # чтобы heartbeat не дрейфовал между per_led/solid/none.
+                current_mode = "per_led" if per_led is not None else ("solid" if color is not None else "idle")
+                if current_mode != last_mode:
+                    count = 0
+                    last_mode = current_mode
+                    last_sent_version = -1
 
-                # Solid Color режим:
-                # Контроллер сбрасывает dimmer иногда, поэтому дублируем яркость каждые 50 пакетов
-                if count % 50 == 0:
+                # Динамически отсылаем яркость при любом изменении (даже в per_led режиме)
+                dimmer = self._hw_dimmer()
+                if dimmer != last_dimmer:
                     bright_pkt = self._bridge.make_bright_packet(dimmer)
-                    self._safe_write(bright_pkt)
-                    self._send_stop.wait(0.005)
+                    if bright_pkt is not None:
+                        self._safe_write(bright_pkt)
+                        self._send_stop.wait(0.005)
+                        last_dimmer = dimmer
 
-                # Color пакет (с учётом температуры)
-                r, g, b = color
-                color_pkt = self._bridge.make_color_packet(
-                    _clamp_ch(r * temp[0]), _clamp_ch(g * temp[1]), _clamp_ch(b * temp[2]))
-                self._safe_write(color_pkt)
-                count += 1
+                if per_led is not None:
+                    # Шлём RGB transfer только при новом кадре (версия сменилась)
+                    # или смене температуры; периодический resend каждые ~40
+                    # итераций — страховка от потерянных пакетов, heartbeat
+                    # держит соединение.
+                    if version != last_sent_version or temp != last_temp or count % 40 == 0:
+                        if temp != (1.0, 1.0, 1.0):
+                            scaled = [(_clamp_ch(r * temp[0]), _clamp_ch(g * temp[1]), _clamp_ch(b * temp[2]))
+                                      for r, g, b in per_led]
+                            rgb_pkt = self._bridge.make_rgb_transfer_packet(scaled)
+                        else:
+                            rgb_pkt = self._bridge.make_rgb_transfer_packet(per_led)
+                        # Помечаем версию отправленной только при реальной
+                        # посылке — иначе упавший пакет никогда не дойдёт.
+                        if rgb_pkt is not None:
+                            self._safe_write(rgb_pkt)
+                            last_sent_version = version
+                            last_temp = temp
+                    count += 1
 
-                # Heartbeat каждые N пакетов
-                if count % self._hb_every == 0:
+                    if count % self._hb_every == 0:
+                        self._safe_write(hb)
+                        self._send_stop.wait(0.005)
+
+                    self._send_stop.wait(self._send_interval)
+
+                elif color is not None:
+                    # Плавный переход цвета: лерпим к цели, snap при сходимости.
+                    tgt = self._target_color
+                    if tgt is not None:
+                        nr = self._lerp_step(color[0], tgt[0])
+                        ng = self._lerp_step(color[1], tgt[1])
+                        nb = self._lerp_step(color[2], tgt[2])
+                        if abs(nr - tgt[0]) < 0.6 and abs(ng - tgt[1]) < 0.6 and abs(nb - tgt[2]) < 0.6:
+                            nr, ng, nb = tgt
+                        self._current_color = (nr, ng, nb)
+                        color = self._current_color
+
+                    # Solid Color режим:
+                    # Контроллер сбрасывает dimmer иногда, поэтому дублируем яркость каждые 50 пакетов
+                    if count % 50 == 0:
+                        bright_pkt = self._bridge.make_bright_packet(dimmer)
+                        if bright_pkt is not None:
+                            self._safe_write(bright_pkt)
+                            self._send_stop.wait(0.005)
+
+                    # Color пакет (с учётом температуры)
+                    r, g, b = color
+                    color_pkt = self._bridge.make_color_packet(
+                        _clamp_ch(r * temp[0]), _clamp_ch(g * temp[1]), _clamp_ch(b * temp[2]))
+                    self._safe_write(color_pkt)
+                    count += 1
+
+                    # Heartbeat каждые N пакетов
+                    if count % self._hb_every == 0:
+                        self._safe_write(hb)
+                        self._send_stop.wait(0.005)
+
+                    self._send_stop.wait(self._send_interval)
+                else:
+                    # Нет цвета — только heartbeat раз в 500ms
                     self._safe_write(hb)
-                    self._send_stop.wait(0.005)
-
-                self._send_stop.wait(self._send_interval)
-            else:
-                # Нет цвета — только heartbeat раз в 500ms
-                self._safe_write(hb)
-                self._send_stop.wait(0.5)
+                    self._send_stop.wait(0.5)
+            except Exception as e:
+                # Исключение не должно убивать send-loop: без heartbeat'ов
+                # контроллер выходит из PC mode и лента «сбрасывается».
+                print(f"[Driver] send-loop error: {e}")
+                self._send_stop.wait(0.1)
 
     def _safe_write(self, data):
         """

@@ -93,12 +93,31 @@ class ScreenMirrorEngine:
         # Захватываем только полосы по краям, потому что layout sample_rect
         # никогда не требует пиксели из центра экрана.
         frame = self._capturer.capture_edges(edge_depth=self._layout.edge_depth)
-        sampled = sample_frame(
-            frame=frame,
-            layout=self._layout,
-            smoother=self._smoother,
-            saturation_boost=self._saturation_boost,
-        )
+        try:
+            sampled = sample_frame(
+                frame=frame,
+                layout=self._layout,
+                smoother=self._smoother,
+                saturation_boost=self._saturation_boost,
+            )
+        except ValueError:
+            # Размер кадра не совпал с геометрией layout: на KWin/Wayland
+            # native-resolution отдаёт физические пиксели, а mss-геометрия
+            # — логические (display scaling). Перестраиваем layout под
+            # реальный кадр и пробуем ещё раз.
+            self._layout = build_layout(
+                config=self._config,
+                capture_width=frame.width,
+                capture_height=frame.height,
+                edge_fraction=self._edge_fraction,
+            )
+            self._smoother.reset()
+            sampled = sample_frame(
+                frame=frame,
+                layout=self._layout,
+                smoother=self._smoother,
+                saturation_boost=self._saturation_boost,
+            )
         return MirroringFrameResult(
             layout=self._layout,
             sampled=sampled,

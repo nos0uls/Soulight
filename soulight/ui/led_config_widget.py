@@ -392,8 +392,10 @@ class LEDConfigPanel(QWidget):
     - Reset / Confirm
     """
 
-    # Сигнал: конфигурация изменена и подтверждена
+    # Сигнал: конфигурация изменена и подтверждена (Confirm/Reset)
     config_confirmed = pyqtSignal()
+    # Сигнал: запрошен live-preview кадр на ленту (без сохранения конфига)
+    preview_requested = pyqtSignal()
     # Сигнал: изменился режим Live Preview (bool)
     live_preview_changed = pyqtSignal(bool)
 
@@ -640,12 +642,14 @@ class LEDConfigPanel(QWidget):
         return self._config.total + self._config.start_offset <= MAX_LEDS
 
     def _maybe_send_preview(self):
-        """Отправляет Live Preview только если конфигурация валидна."""
+        """Отправляет Live Preview только если конфигурация валидна.
+        Preview не сохраняет конфиг и не триггерит config_confirmed —
+        это делает только Confirm/Reset."""
         if not self._live_preview:
             return
         if self._is_valid_config():
             self._total_label.setToolTip("")
-            self.config_confirmed.emit()
+            self.preview_requested.emit()
         else:
             self._total_label.setToolTip(
                 "Total + offset exceeds MAX_LEDS. Live preview blocked."
@@ -681,6 +685,9 @@ class LEDConfigPanel(QWidget):
         self._dir_combo.setCurrentIndex(0)
         self._offset_spin.setValue(0)
         self._maybe_send_preview()
+        # Конфиг уже сохранён выше — уведомляем подписчиков,
+        # чтобы работающие движки перечитали раскладку.
+        self.config_confirmed.emit()
 
     def _on_confirm(self):
         """Сохраняет конфигурацию. Блокирует если total + offset > MAX_LEDS."""

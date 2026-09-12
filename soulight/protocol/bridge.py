@@ -43,6 +43,7 @@ class BeelightBridge:
         self._gen_bright = None
         self._gen_switch = None
         self._gen_work_mode = None
+        self._gen_rgb_transfer = None
         self._gen_frame = None
         # .NET enum типы
         self._wk_mode_type = None
@@ -321,7 +322,20 @@ class BeelightBridge:
         """
         Возвращает предгенерированный heartbeat пакет (bytes).
         Heartbeat одинаковый каждый раз, поэтому кешируется.
+        Если при init генерация не удалась — пробуем ещё раз лениво,
+        иначе контроллер остался бы вообще без heartbeat'ов.
         """
+        if self._heartbeat_pkt is None and self._ready and self._gen_frame is not None:
+            try:
+                from System import Array, Byte as NetByte, Enum
+                attr_req = Enum.ToObject(self._attr_type, 0)  # LP_ATTR_REQ
+                cmd_hb = Enum.ToObject(self._cmd_type, 0)     # LP_CMD_HEARTBEAT
+                empty = Array.CreateInstance(NetByte, 0)
+                result = self._gen_frame.Invoke(None, [attr_req, cmd_hb, empty])
+                if result is not None:
+                    self._heartbeat_pkt = bytes(result)
+            except Exception:
+                pass
         return self._heartbeat_pkt
 
 

@@ -161,10 +161,16 @@ def _sample_side_strip(
         segs.append((s, e, i))
     segs.sort()
 
+    # Prefix sums вместо reduceat: reduceat суммирует [start_i : start_{i+1}],
+    # т.е. при выключенных LED между сегментами соседний сегмент «заливает»
+    # свою зону чужими пикселями (размытие/hotspot). Cumsum даёт точный
+    # [s:e) диапазон каждого сегмента.
+    cum = np.concatenate(
+        [np.zeros((1, 3), np.float32), np.cumsum(line, axis=0)])
     starts = np.array([s for s, _, _ in segs], dtype=np.int64)
-    counts = np.array([e - s for s, e, _ in segs], dtype=np.float32)
-    sums = np.add.reduceat(line, starts, axis=0)
-    means = sums / counts[:, None]
+    ends = np.array([e for _, e, _ in segs], dtype=np.int64)
+    counts = (ends - starts).astype(np.float32)
+    means = (cum[ends] - cum[starts]) / counts[:, None]
     for (s, e, i), m in zip(segs, means):
         out[i] = m
 

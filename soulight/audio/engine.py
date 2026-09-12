@@ -130,6 +130,8 @@ class AudioEngine(QObject):
         self._mode_name = name
         if params is not None:
             self._mode_params = dict(params)
+        # Сглаженная история старого режима не должна перетекать в новый.
+        self._mode_params.pop("history", None)
 
     def set_sensitivity(self, value: float):
         self._mode_params["sensitivity"] = max(0.1, min(5.0, float(value)))
@@ -152,6 +154,12 @@ class AudioEngine(QObject):
     def set_led_count(self, n: int):
         """Меняет число LED на лету (Full LED toggle)."""
         self._led_count = max(1, int(n))
+
+    def set_output_config(self, led_count: int, layout_leds: Optional[list]):
+        """Атомарная смена led_count + маски — иначе кадр между двумя
+        отдельными сеттерами рисует промежуточное состояние (flash)."""
+        self._led_count = max(1, int(led_count))
+        self._layout_leds = layout_leds
 
     def start(self, mode_name: str, device_id: Optional[str] = None, params: Optional[dict] = None):
         """
@@ -182,13 +190,17 @@ class AudioEngine(QObject):
             self._thread = None
         self.status_changed.emit("Stopped")
 
-    def _compute_fft(self, chunk: np.ndarray) -> np.ndarray:
-        """Возвращает magnitudes FFT (0..Nyquist)."""
+    def _compute_fft(self, chunk: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Возвращает (magnitudes, freq_bins) — bins пересчитываются,
+        если реальный чанк короче block_size (нестандартный кадр бэкенда),
+        иначе modes-функции с маской по freq_bins падают на длинах."""
         window = self._window
+        freq_bins = self._freq_bins
         if len(chunk) != len(window):
             window = np.hanning(len(chunk)).astype(np.float32)
+            freq_bins = np.fft.rfftfreq(len(chunk), 1.0 / self._sample_rate)
         spectrum = np.fft.rfft(chunk * window)
-        return np.abs(spectrum)
+        return np.abs(spectrum), freq_bins
 
     def _run_loop(self):
         # ВАЖНО: soundcard на Windows открывает WASAPI-устройства.
@@ -219,10 +231,10 @@ class AudioEngine(QObject):
                     if self._mode_name is not None:
                         mode_fn = AUDIO_MODES.get(self._mode_name)
                         if mode_fn is not None:
-                            mags = self._compute_fft(chunk)
+                            mags, freq_bins = self._compute_fft(chunk)
                             colors = mode_fn(
                                 magnitudes=mags,
-                                freq_bins=self._freq_bins,
+                                freq_bins=freq_bins,
                                 led_count=self._led_count,
                                 params=self._mode_params,
                             )

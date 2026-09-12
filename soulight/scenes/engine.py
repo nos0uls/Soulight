@@ -4,7 +4,6 @@
 # и отправляет их через callback в LED driver.
 
 import threading
-import time
 from typing import Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -58,6 +57,12 @@ class SceneEngine(QObject):
         self._pattern_name = name
         if params is not None:
             self._pattern_params = dict(params)
+        # Транзиентное состояние паттерна (напр. _fw_prev у firework) не
+        # должно переезжать между паттернами — иначе первый кадр нового
+        # затухает из кадра старого.
+        self._pattern_params.pop("_fw_prev", None)
+        self._pattern_params["speed"] = max(
+            0.25, min(4.0, float(self._pattern_params.get("speed", 1.0))))
         self._frame_index = 0
 
     def set_layout(self, layout_leds: Optional[list]):
@@ -67,6 +72,12 @@ class SceneEngine(QObject):
     def set_led_count(self, n: int):
         """Меняет число LED паттерна на лету (Full LED toggle)."""
         self._led_count = max(1, int(n))
+
+    def set_output_config(self, led_count: int, layout_leds: Optional[list]):
+        """Атомарная смена led_count + маски — иначе кадр между двумя
+        отдельными сеттерами рисует промежуточное состояние (flash)."""
+        self._led_count = max(1, int(led_count))
+        self._layout_leds = layout_leds
 
     def set_speed(self, speed: float):
         """Меняет параметр speed паттерна (0.25..4.0)."""
@@ -97,6 +108,13 @@ class SceneEngine(QObject):
 
     def _run_loop(self):
         """Основной loop: генерируем кадр, эмитим, спим."""
+        try:
+            self._run_loop_inner()
+        finally:
+            # Поток завершился любым путём — running не должен врать.
+            self._running = False
+
+    def _run_loop_inner(self):
         pattern_fn = None
         while not self._stop_event.is_set():
             # Если паттерн сменился — обновляем ссылку
@@ -120,7 +138,7 @@ class SceneEngine(QObject):
                     self._frame_index += 1
                 except Exception as e:
                     self.error_occurred.emit(f"Pattern error: {e}")
-                    time.sleep(0.5)
+                    self._stop_event.wait(0.5)  # прерываемый sleep
                     continue
 
             # Точный sleep с учётом времени генерации

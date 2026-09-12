@@ -166,8 +166,8 @@ def color(r: int, g: int, b: int) -> bytes:
 
 
 def set_work_mode(mode: int) -> bytes:
-    """00 05 06 ff 03 <u32le> — режим работы. mode=0 = PC (LP_WK_MODE_PC)."""
-    return packet(b"\x00\x05\x06\xff\x03" + int(mode).to_bytes(4, "little"))
+    """00 05 06 ff 03 00 <mode> 00 00 — режим работы. mode=0 = PC (LP_WK_MODE_PC)."""
+    return packet(b"\x00\x05\x06\xff\x03\x00" + bytes([mode & 0xFF, 0, 0]))
 
 
 def switch(on: bool) -> bytes:

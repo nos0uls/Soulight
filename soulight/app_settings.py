@@ -20,12 +20,13 @@ SETTINGS_FILE = os.path.join(_config_dir(), "app_settings.json")
 DEFAULTS = {
     # Восстановление последнего режима при старте
     "restore_mode": True,
-    "last_mode": "color",       # color | mirror | scene | audio
+    "last_mode": "color",       # color | mirror | scene | audio | off
     "last_color": [255, 0, 255],
     "brightness": 255,
     "scene_pattern": "rainbow",
     "scene_speed": 1.0,
     "scene_fps": 20,
+    "scene_full_led": True,
     "audio_mode": "spectrum",
     "audio_device": None,       # id устройства или None = default mic
     "audio_fps": 30,
@@ -74,10 +75,14 @@ class AppSettings:
             print(f"[Settings] Ошибка загрузки: {e}")
 
     def save(self):
+        """Атомарная запись: tmp + os.replace — обрыв посередине не
+        оставляет обрезанный JSON, который сломал бы следующую загрузку."""
         try:
             os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
-            with open(SETTINGS_FILE, "w") as f:
+            tmp = SETTINGS_FILE + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(self._data, f, indent=2)
+            os.replace(tmp, SETTINGS_FILE)
         except Exception as e:
             print(f"[Settings] Ошибка сохранения: {e}")
 
