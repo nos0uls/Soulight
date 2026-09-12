@@ -139,14 +139,10 @@ def _sample_side_strip(
 ) -> None:
     horizontal = side in (SIDE_TOP, SIDE_BOTTOM)
     strip = region.rgb  # (depth, W, 3) для top/bottom, (H, depth, 3) для left/right
-    # Субсэмплинг по толщине полосы: для ambient-усреднения ~24 строк
-    # неотличимы от всех 86, а mean в 3-4x дешевле.
-    cross = strip.shape[0] if horizontal else strip.shape[1]
-    step = max(1, cross // 24)
-    # Среднее по поперечной оси полосы → 1D-профиль цвета вдоль края.
-    line = (strip[::step] if horizontal else strip[:, ::step]).mean(
-        axis=0 if horizontal else 1, dtype=np.float32
-    )  # (N, 3)
+    # Среднее по всей поперечной оси полосы → 1D-профиль цвета вдоль края.
+    # rect всегда занимает всю толщину полосы, поэтому это точный
+    # эквивалент per-rect mean (mean of means == mean при равных весах).
+    line = strip.mean(axis=0 if horizontal else 1, dtype=np.float32)  # (N, 3)
     n = line.shape[0]
 
     # Собираем сегменты в координатах полосы, сортируем по start
