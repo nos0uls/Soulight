@@ -119,6 +119,7 @@ class AutoBrightnessService:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._camera = None
+        self._camera_paused = False   # быстрая пауза без рестарта сервиса
         self._camera_fail_count = 0
         self._manual_until = 0.0
         self._last_luma: Optional[float] = None
@@ -152,6 +153,20 @@ class AutoBrightnessService:
     def notify_manual_adjustment(self):
         """UI зовёт при ручном движении слайдера яркости."""
         self._manual_until = time.monotonic() + float(self._params["manual_pause_s"])
+
+    @property
+    def camera_paused(self) -> bool:
+        return self._camera_paused
+
+    def set_camera_paused(self, paused: bool):
+        """
+        Быстрая пауза веб-камеры без рестарта сервиса: камера освобождается,
+        чтения пропускаются. Кривая день/ночь и manual-pause работают как раньше.
+        """
+        self._camera_paused = bool(paused)
+        if paused:
+            self._release_camera()
+            self._camera_fail_count = 0
 
     def start(self):
         if self._running:
@@ -243,7 +258,7 @@ class AutoBrightnessService:
             # Камера опрашивается с периодом poll_interval; при серии
             # ошибок открытия — дополнительный backoff, чтобы не дёргать
             # cv2.VideoCapture каждый цикл на отсутствующей камере.
-            if p["ambient_enabled"]:
+            if p["ambient_enabled"] and not self._camera_paused:
                 backoff = 30.0 if self._camera_fail_count >= 5 else 0.0
                 if now - last_cam >= float(p["poll_interval"]) + backoff:
                     last_cam = now
@@ -267,6 +282,7 @@ class AutoBrightnessService:
                 f"luma={self._last_luma if self._last_luma is None else round(self._last_luma)} "
                 f"→ {target}"
                 + (" (manual)" if now < self._manual_until else "")
+                + (" (cam paused)" if self._camera_paused else "")
             )
             # Цель пересчитывается каждую секунду — кривая времени и
             # manual-pause движутся плавно независимо от poll_interval.

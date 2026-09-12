@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 
-from soulight.led_config import LEDConfig
+from soulight.led_config import LEDConfig, MAX_LEDS
 from soulight.protocol.serial_driver import LEDDriver
 from soulight.scenes.patterns import PATTERNS
 
@@ -67,6 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="индекс монитора для --mode mirror (default: 1)")
     p.add_argument("--edge", type=float, default=8.0,
                    help="толщина края экрана для mirror, %% (default: 8)")
+    p.add_argument("--full-led", action="store_true",
+                   help="scene/audio: все физические LED, без маски монитора")
     p.add_argument("--port", default=None,
                    help="serial порт (иначе SOULIGHT_PORT/автодетект)")
     p.add_argument("--no-retry", action="store_true",
@@ -89,6 +91,14 @@ def _layout_leds(config: LEDConfig):
     return build_layout(config, 100, 100, 0.08).leds
 
 
+def _mode_led_count(config: LEDConfig, full_led: bool) -> int:
+    """Full LED — вся физическая лента (total + start_offset),
+    иначе — логические LED по монитору."""
+    if full_led:
+        return min(MAX_LEDS, config.total + config.start_offset)
+    return config.total
+
+
 def _run_scene(driver, args, config: LEDConfig, stop: threading.Event):
     """Сцены напрямую через pattern-функции — без QObject/Qt."""
     from soulight.scenes.patterns import PATTERNS as _P
@@ -96,11 +106,12 @@ def _run_scene(driver, args, config: LEDConfig, stop: threading.Event):
     pattern_fn = _P[args.pattern]
     params = {"speed": max(0.25, min(4.0, args.speed))}
     interval = 1.0 / max(1.0, min(60.0, args.fps))
-    leds = _layout_leds(config)
+    led_count = _mode_led_count(config, args.full_led)
+    leds = [] if args.full_led else _layout_leds(config)
     frame = 0
     while not stop.is_set():
         t0 = time.perf_counter()
-        colors = pattern_fn(frame, config.total, params)
+        colors = pattern_fn(frame, led_count, params)
         for led in leds:
             if not led.enabled and led.logical_index < len(colors):
                 colors[led.logical_index] = (0, 0, 0)
@@ -118,8 +129,10 @@ def _run_audio(driver, args, config: LEDConfig, stop: threading.Event):
             f"Неизвестный --audio-mode {args.audio_mode!r}. "
             f"Доступно: {', '.join(sorted(AUDIO_MODES))}"
         )
-    engine = AudioEngine(led_count=config.total, fps=args.fps)
-    engine.set_layout(_layout_leds(config))
+    engine = AudioEngine(
+        led_count=_mode_led_count(config, args.full_led), fps=args.fps)
+    if not args.full_led:
+        engine.set_layout(_layout_leds(config))
     engine.frame_ready.connect(driver.set_per_led_colors)
     engine.error_occurred.connect(lambda m: print(f"[audio] {m}", file=sys.stderr))
     engine.start(args.audio_mode, device_id=args.device)
@@ -172,10 +185,12 @@ def main(argv=None):
             args.mode = "scene"
             args.pattern = st.get("scene_pattern", "rainbow")
             args.speed = st.get("scene_speed", 1.0)
+            args.full_led = args.full_led or bool(st.get("scene_full_led", False))
         elif mode == "audio":
             args.mode = "audio"
             args.audio_mode = st.get("audio_mode", "spectrum")
             args.device = args.device or st.get("audio_device")
+            args.full_led = args.full_led or bool(st.get("audio_full_led", False))
         elif mode == "off":
             args.mode = "off"
         else:

@@ -64,6 +64,10 @@ class SceneEngine(QObject):
         """Устанавливает маску layout_leds (LayoutLed) для гашения выключенных LED."""
         self._layout_leds = layout_leds
 
+    def set_led_count(self, n: int):
+        """Меняет число LED паттерна на лету (Full LED toggle)."""
+        self._led_count = max(1, int(n))
+
     def set_speed(self, speed: float):
         """Меняет параметр speed паттерна (0.25..4.0)."""
         self._pattern_params["speed"] = max(0.25, min(4.0, float(speed)))

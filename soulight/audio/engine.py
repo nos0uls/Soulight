@@ -149,6 +149,10 @@ class AudioEngine(QObject):
     def set_layout(self, layout_leds: Optional[list]):
         self._layout_leds = layout_leds
 
+    def set_led_count(self, n: int):
+        """Меняет число LED на лету (Full LED toggle)."""
+        self._led_count = max(1, int(n))
+
     def start(self, mode_name: str, device_id: Optional[str] = None, params: Optional[dict] = None):
         """
         Запускает захват. device_id — id устройства из list_capture_devices():

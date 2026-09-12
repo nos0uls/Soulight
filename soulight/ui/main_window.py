@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QLabel, QSlider, QPushButton, QLineEdit, QGridLayout,
     QGroupBox, QFrame, QMessageBox, QTabWidget,
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox, QTimeEdit,
+    QColorDialog,
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QTime
 from PyQt6.QtGui import QColor, QPainter, QFont
@@ -295,6 +296,10 @@ class MainWindow(QMainWindow):
         self._auto_service = AutoBrightnessService(
             self._driver, self._settings.auto_params())
         self._mode_restored = False  # восстановление режима — один раз при старте
+        # Активный режим ленты: None | "color" | "mirror" | "scene" | "audio".
+        # Режим меняется только кнопкой (Re)Start — переключение вкладок
+        # ничего не запускает и не останавливает.
+        self._active_mode = None
         # Программный setValue слайдера яркости (загрузка пресета) не
         # должен ставить автояркость на паузу как ручное изменение.
         self._suppress_manual_pause = False
@@ -395,8 +400,49 @@ class MainWindow(QMainWindow):
         self._build_auto_tab(auto_layout)
         self._tabs.addTab(auto_page, "Auto")
 
-        # Tab change handler для управления состоянием ленты
+        # Tab change handler: только выбор того, ЧТО запустит (Re)Start.
+        # Никаких действий с лентой при переключении вкладок.
         self._tabs.currentChanged.connect(self._on_tab_changed)
+
+        # === Общая панель управления режимом (вне вкладок) ===
+        ctrl_layout = QHBoxLayout()
+        self._btn_mode_start = QPushButton("(Re)Start")
+        self._btn_mode_start.setFixedHeight(36)
+        self._btn_mode_start.setStyleSheet(
+            "background-color: #2d8c2d; color: white; font-weight: bold; border-radius: 6px;"
+        )
+        self._btn_mode_start.setToolTip(
+            "Запустить режим текущей вкладки (Color / Mirror / Scenes / Audio)"
+        )
+        self._btn_mode_start.clicked.connect(self._on_mode_start)
+        ctrl_layout.addWidget(self._btn_mode_start)
+
+        self._btn_mode_stop = QPushButton("Stop")
+        self._btn_mode_stop.setFixedHeight(36)
+        self._btn_mode_stop.setStyleSheet(
+            "background-color: #cc3333; color: white; font-weight: bold; border-radius: 6px;"
+        )
+        self._btn_mode_stop.setEnabled(False)
+        self._btn_mode_stop.setToolTip("Остановить режим — лента гаснет")
+        self._btn_mode_stop.clicked.connect(self._on_mode_stop)
+        ctrl_layout.addWidget(self._btn_mode_stop)
+
+        # Быстрая пауза веб-камеры автояркости — без рестарта сервиса.
+        self._btn_cam_pause = QPushButton("Cam ⏸")
+        self._btn_cam_pause.setCheckable(True)
+        self._btn_cam_pause.setToolTip(
+            "Пауза веб-камеры автояркости (камера освобождается, "
+            "кривая день/ночь продолжает работать)"
+        )
+        self._btn_cam_pause.toggled.connect(self._on_cam_pause_toggled)
+        ctrl_layout.addWidget(self._btn_cam_pause)
+        layout.addLayout(ctrl_layout)
+
+        # Статусная строка: подключение + активный режим
+        self._mode_status_label = QLabel("Mode: off")
+        self._mode_status_label.setStyleSheet("color: #9399b2;")
+        layout.addWidget(self._mode_status_label)
+        self._update_mode_status()
 
     def _build_color_tab(self, layout):
         """Строит содержимое вкладки Color."""
@@ -413,6 +459,12 @@ class MainWindow(QMainWindow):
         self._hex_input.setFont(QFont("Consolas", 11))
         self._hex_input.returnPressed.connect(self._on_hex_changed)
         hex_layout.addWidget(self._hex_input)
+        self._btn_pick_color = QPushButton("Pick a color")
+        self._btn_pick_color.setToolTip(
+            "Открыть системный выбор цвета — новый цвет сохранится"
+        )
+        self._btn_pick_color.clicked.connect(self._on_pick_color)
+        hex_layout.addWidget(self._btn_pick_color)
         hex_layout.addStretch()
         layout.addLayout(hex_layout)
 
@@ -648,27 +700,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(tuning_group)
         # endregion
 
-        # region Start / Stop кнопки
-        btn_row = QHBoxLayout()
-        self._btn_mirror_start = QPushButton("Start")
-        self._btn_mirror_start.setFixedHeight(36)
-        self._btn_mirror_start.setStyleSheet(
-            "background-color: #2d8c2d; color: white; font-weight: bold; border-radius: 6px;"
-        )
-        self._btn_mirror_start.clicked.connect(self._start_screen_mirroring)
-        btn_row.addWidget(self._btn_mirror_start)
-
-        self._btn_mirror_stop = QPushButton("Stop")
-        self._btn_mirror_stop.setFixedHeight(36)
-        self._btn_mirror_stop.setStyleSheet(
-            "background-color: #cc3333; color: white; font-weight: bold; border-radius: 6px;"
-        )
-        self._btn_mirror_stop.setEnabled(False)
-        self._btn_mirror_stop.clicked.connect(self._stop_screen_mirroring)
-        btn_row.addWidget(self._btn_mirror_stop)
-        layout.addLayout(btn_row)
-        # endregion
-
+        hint = QLabel("Запуск/остановка — общей кнопкой (Re)Start внизу окна.")
+        hint.setStyleSheet("color: #6c7086;")
+        layout.addWidget(hint)
         layout.addStretch()
         # Заполняем список мониторов при создании вкладки
         self._populate_monitor_combo()
@@ -889,6 +923,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Not connected",
                                 "Connect to the controller first.")
             return
+        self._stop_all_modes()
         # Создаём background thread и worker
         self._mirror_thread = QThread()
         worker_args = self._rebuild_mirror_engine()
@@ -913,14 +948,13 @@ class MainWindow(QMainWindow):
         # Hardware dimmer — из основного слайдера (mirror-слайдер ему синхронен).
         self._driver.set_brightness(self._slider_bright.value())
         self._screen_mirror_timer.start(self._mirror_interval_ms())
-        self._btn_mirror_start.setEnabled(False)
-        self._btn_mirror_stop.setEnabled(True)
+        self._active_mode = "mirror"
+        self._btn_mode_stop.setEnabled(True)
         self._save_mode("mirror")
         self._update_mirror_status(
             f"Running · {self._mirror_effective_fps()} FPS effective",
             "#2d8c2d",
         )
-        self._btn_mirror_stop.setFocus()
         # Первый кадр просим не мгновенно, а на следующем тике event loop.
         # Это уменьшает шанс стартовой гонки между UI thread и worker thread.
         # Увеличили до 100ms — на медленных системах thread старт может занимать 50-80ms.
@@ -941,12 +975,9 @@ class MainWindow(QMainWindow):
             self._mirror_thread = None
         self._mirror_worker = None
         self._mirror_frame_pending = False
-        self._btn_mirror_start.setEnabled(True)
-        self._btn_mirror_stop.setEnabled(False)
         self._update_mirror_status("Idle")
-        if restore_output and self._driver.connected:
-            # Возвращаем выбранный статичный цвет — как при Stop в Scenes/Audio.
-            self._driver.set_color(self._r, self._g, self._b)
+        if restore_output:
+            self._mode_stopped("mirror")
 
     def _tick_screen_mirroring(self):
         """
@@ -974,10 +1005,7 @@ class MainWindow(QMainWindow):
     def _on_mirror_error(self, error_msg):
         """Slot: worker поймал ошибку при capture/sample."""
         self._mirror_frame_pending = False
-        self._stop_screen_mirroring(restore_output=False)
-        # Лента не должна остаться замороженной на последнем кадре.
-        if self._driver.connected:
-            self._driver.set_color(self._r, self._g, self._b)
+        self._stop_screen_mirroring(restore_output=True)
         self._update_mirror_status(f"Error: {error_msg}", "#f38ba8")
 
     def _on_mirror_monitor_changed(self, index):
@@ -1073,40 +1101,100 @@ class MainWindow(QMainWindow):
         self._label_g.setText(str(g))
         self._label_b.setText(str(b))
 
+    # Вкладки, с которых (Re)Start запускает режим ленты.
+    # LED Config (1) и Auto (5) — настройки, не режимы.
+    _MODE_TABS = (0, 2, 3, 4)
+
     def _on_tab_changed(self, index):
         """
-        Обработчик переключения вкладок.
-        0 = Color: восстанавливаем solid color preset
-        1 = LED Config: гасим вывод, ждём Live Preview / Confirm
-        2 = Screen Mirror: гасим solid, mirroring стартует кнопкой
-        3 = Scenes: гасим solid, scenes стартуют кнопкой
-        4 = Audio: гасим solid, audio стартует кнопкой
+        Переключение вкладки — только выбор того, что запустит (Re)Start.
+        Ленту не трогаем: активный режим продолжает работать при смене
+        вкладки, новый запускается только кнопкой.
         """
-        prev_tab = self._current_tab
         self._current_tab = index
+        self._update_mode_status()
 
-        # При уходе с активных вкладок — останавливаем их потоки
-        if prev_tab == 2 and index != 2:
-            self._stop_screen_mirroring(restore_output=False)
-        if prev_tab == 3 and index != 3:
-            self._stop_scenes()
-        if prev_tab == 4 and index != 4:
-            self._stop_audio()
+    def _mode_name(self) -> str:
+        """Человекочитаемое имя активного режима для статусной строки."""
+        if self._active_mode == "color":
+            return f"Color #{self._r:02X}{self._g:02X}{self._b:02X}"
+        if self._active_mode == "mirror":
+            return f"Screen Mirror · {self._mirror_effective_fps()} FPS"
+        if self._active_mode == "scene":
+            p = self._scene_pattern_combo.currentData()
+            return f"Scene: {PATTERN_LABELS.get(p, p)}"
+        if self._active_mode == "audio":
+            m = self._audio_mode_combo.currentData()
+            return f"Audio: {MODE_LABELS.get(m, m)}"
+        return "off"
 
+    def _update_mode_status(self):
+        """Строка под кнопками: подключение + активный режим."""
+        conn = "connected" if self._driver.connected else "disconnected"
+        tab_names = {0: "Color", 2: "Screen Mirror", 3: "Scenes", 4: "Audio"}
+        selected = tab_names.get(self._current_tab)
+        sel = f" · selected: {selected}" if selected else ""
+        self._mode_status_label.setText(
+            f"LED: {conn} · mode: {self._mode_name()}{sel}"
+        )
+        self._btn_mode_start.setEnabled(
+            self._driver.connected and self._current_tab in self._MODE_TABS
+        )
+        self._btn_mode_stop.setEnabled(
+            self._driver.connected and self._active_mode is not None
+        )
+
+    def _on_mode_start(self):
+        """(Re)Start: запускает режим открытой вкладки."""
         if not self._driver.connected:
+            QMessageBox.warning(self, "Not connected",
+                                "Connect to the controller first.")
             return
+        tab = self._current_tab
+        if tab == 0:
+            self._stop_all_modes()
+            self._active_mode = "color"
+            # Сохранит preset + last_mode и отправит цвет на ленту.
+            self._send_current_color()
+        elif tab == 2:
+            self._start_screen_mirroring()
+        elif tab == 3:
+            self._start_scenes(self._scene_pattern_combo.currentData())
+        elif tab == 4:
+            self._start_audio(self._audio_mode_combo.currentData(),
+                              self._audio_source_combo.currentData())
+        self._update_mode_status()
 
-        if index == 0:  # Возврат на Color tab
-            r, g, b = self._color_preset.as_tuple()
-            self._driver.set_color(r, g, b)
-            self._driver.set_brightness(self._color_preset.brightness)
-        elif index == 1:  # Переход в LED Config
-            if self._led_config_panel.live_preview:
-                self._send_led_config_preview()
-            else:
-                self._driver.set_color(0, 0, 0)
-        elif index in (2, 3, 4):  # Screen Mirror / Scenes / Audio
+    def _on_mode_stop(self):
+        """Stop: останавливает активный режим, лента гаснет."""
+        self._stop_all_modes()
+        self._active_mode = None
+        if self._driver.connected:
             self._driver.set_color(0, 0, 0)
+        self._update_mode_status()
+
+    def _stop_all_modes(self):
+        """Останавливает все динамические режимы без восстановления цвета."""
+        self._stop_screen_mirroring(restore_output=False)
+        self._stop_scenes()
+        self._stop_audio()
+
+    def _on_cam_pause_toggled(self, paused: bool):
+        """Пауза веб-камеры автояркости без рестарта сервиса."""
+        self._auto_service.set_camera_paused(paused)
+        self._btn_cam_pause.setText("Cam ▶" if paused else "Cam ⏸")
+
+    def _on_pick_color(self):
+        """Диалог выбора цвета; выбранный цвет сохраняется в preset."""
+        initial = QColor(self._r, self._g, self._b)
+        color = QColorDialog.getColor(initial, self, "Pick a color")
+        if not color.isValid():
+            return
+        self._slider_r.setValue(color.red())
+        self._slider_g.setValue(color.green())
+        self._slider_b.setValue(color.blue())
+        # setValue триггерит _on_slider_changed → preview + preset save.
+        # Если активен режим Color — цвет уйдёт на ленту сразу.
 
     def _on_led_config_confirmed(self):
         """
@@ -1232,6 +1320,7 @@ class MainWindow(QMainWindow):
             self._driver.set_brightness(self._slider_bright.value())
             self._send_current_color()
             self._maybe_restore_mode()
+            self._update_mode_status()
         else:
             if is_auto and self._auto_connect_attempt < self._auto_connect_max_attempts:
                 next_attempt = self._auto_connect_attempt + 1
@@ -1257,14 +1346,14 @@ class MainWindow(QMainWindow):
     def _on_disconnect(self):
         """Отключение от контроллера."""
         self._is_auto_connecting = False
-        self._stop_screen_mirroring(restore_output=False)
-        self._stop_scenes()
-        self._stop_audio()
+        self._stop_all_modes()
+        self._active_mode = None
         self._driver.disconnect()
         self._status_label.setText("Disconnected")
         self._status_label.setStyleSheet("color: #cc3333; font-weight: bold;")
         self._btn_connect.setEnabled(True)
         self._btn_disconnect.setEnabled(False)
+        self._update_mode_status()
 
     # endregion
 
@@ -1302,18 +1391,12 @@ class MainWindow(QMainWindow):
 
     def _send_current_color(self):
         """
-        Отправляет текущий цвет на LED ленту (если подключено).
-        Отправляется только если на вкладке Color и нет активных режимов.
+        Сохраняет текущий цвет в preset; отправляет на ленту только
+        когда активен режим Color (запускается общей кнопкой (Re)Start).
         """
-        # Сохраняем preset
         self._color_preset.set_color(self._r, self._g, self._b)
         self._color_preset.save()
-        # Отправляем только если на Color tab и ничто другое не активно
-        if (self._driver.connected
-                and self._current_tab == 0
-                and not self._screen_mirroring_active
-                and not self._scene_active
-                and not self._audio_active):
+        if self._driver.connected and self._active_mode == "color":
             self._driver.set_color(self._r, self._g, self._b)
             self._save_mode("color", last_color=[self._r, self._g, self._b],
                             brightness=self._slider_bright.value())
@@ -1354,31 +1437,19 @@ class MainWindow(QMainWindow):
         speed_row.addWidget(self._scene_speed_label)
         speed_layout.addLayout(speed_row)
 
-        # Full LED Checkbox
+        # Full LED Checkbox — сохраняется между запусками, применяется на лету.
         self._scene_full_led_cb = QCheckBox("Full LED (Использовать все светодиоды)")
-        self._scene_full_led_cb.setChecked(True)
+        self._scene_full_led_cb.setChecked(
+            bool(self._settings.get("scene_full_led", True)))
         self._scene_full_led_cb.setToolTip("Если выключено, анимация будет игнорировать углы без ленты (как в Screen Mirroring).")
+        self._scene_full_led_cb.toggled.connect(self._on_scene_full_led_toggled)
         speed_layout.addWidget(self._scene_full_led_cb)
         
         layout.addWidget(speed_group)
 
-        btn_row = QHBoxLayout()
-        self._btn_scene_start = QPushButton("Start")
-        self._btn_scene_start.setFixedHeight(36)
-        self._btn_scene_start.setStyleSheet(
-            "background-color: #2d8c2d; color: white; font-weight: bold; border-radius: 6px;"
-        )
-        self._btn_scene_start.clicked.connect(self._on_scene_start_clicked)
-        btn_row.addWidget(self._btn_scene_start)
-        self._btn_scene_stop = QPushButton("Stop")
-        self._btn_scene_stop.setFixedHeight(36)
-        self._btn_scene_stop.setStyleSheet(
-            "background-color: #cc3333; color: white; font-weight: bold; border-radius: 6px;"
-        )
-        self._btn_scene_stop.setEnabled(False)
-        self._btn_scene_stop.clicked.connect(self._stop_scenes)
-        btn_row.addWidget(self._btn_scene_stop)
-        layout.addLayout(btn_row)
+        hint = QLabel("Запуск/остановка — общей кнопкой (Re)Start внизу окна.")
+        hint.setStyleSheet("color: #6c7086;")
+        layout.addWidget(hint)
         layout.addStretch()
 
     def _on_scene_speed_changed(self):
@@ -1393,39 +1464,56 @@ class MainWindow(QMainWindow):
         if self._scene_active and self._scene_engine is not None and pattern in PATTERNS:
             self._scene_engine.set_pattern(pattern)
             self._scene_status_label.setText(f"Running: {PATTERN_LABELS.get(pattern, pattern)}")
+        self._update_mode_status()
 
-    def _on_scene_start_clicked(self):
-        if not self._driver.connected:
-            QMessageBox.warning(self, "Not connected", "Connect to the controller first.")
-            return
-        self._start_scenes(self._scene_pattern_combo.currentData())
+    def _apply_full_led(self, engine, checked: bool):
+        """Live-переключение Full LED: число LED + маска монитора."""
+        engine.set_led_count(self._mode_led_count(checked))
+        if checked:
+            engine.set_layout(None)
+        else:
+            layout_data = build_layout(self._led_config_panel.config, 100, 100, 0.08)
+            engine.set_layout(layout_data.leds)
+
+    def _on_scene_full_led_toggled(self, checked: bool):
+        self._settings.update(scene_full_led=checked)
+        if self._scene_active and self._scene_engine is not None:
+            self._apply_full_led(self._scene_engine, checked)
+
+    def _mode_led_count(self, full_led: bool) -> int:
+        """Кол-во LED для движка: Full LED — вся физическая лента
+        (включая start_offset-диапазон), иначе — логические по монитору."""
+        cfg = self._led_config_panel.config
+        if full_led:
+            return min(MAX_LEDS, cfg.total + cfg.start_offset)
+        return cfg.total
 
     def _start_scenes(self, pattern_name: str):
-        self._stop_scenes()
+        self._stop_all_modes()
         self._scene_thread = QThread()
-        # led_count берём из актуального LED конфига, а не хардкодим
-        actual_led_count = self._led_config_panel.config.total
-        self._scene_engine = SceneEngine(led_count=actual_led_count, fps=20)
-        
-        if not self._scene_full_led_cb.isChecked():
-            from soulight.screen_mirroring.layout import build_layout
+        full_led = self._scene_full_led_cb.isChecked()
+        self._scene_engine = SceneEngine(
+            led_count=self._mode_led_count(full_led), fps=20)
+
+        if not full_led:
             layout_data = build_layout(self._led_config_panel.config, 100, 100, 0.08)
             self._scene_engine.set_layout(layout_data.leds)
-            
+
         self._scene_engine.moveToThread(self._scene_thread)
         self._scene_engine.frame_ready.connect(self._on_scene_frame_ready)
         self._scene_engine.error_occurred.connect(self._on_scene_error)
         self._scene_thread.started.connect(lambda: self._scene_engine.start(pattern_name))
         self._scene_thread.start()
         self._scene_active = True
+        self._active_mode = "scene"
         self._scene_engine.set_speed(self._scene_speed_slider.value() / 100.0)
         self._scene_status_label.setText(f"Running: {PATTERN_LABELS.get(pattern_name, pattern_name)}")
         self._scene_status_label.setStyleSheet("color: #2d8c2d; font-weight: bold;")
-        self._btn_scene_start.setEnabled(False)
-        self._btn_scene_stop.setEnabled(True)
+        self._btn_mode_stop.setEnabled(True)
         self._driver.set_color(0, 0, 0)
         self._save_mode("scene", scene_pattern=pattern_name,
-                        scene_speed=self._scene_speed_slider.value() / 100.0)
+                        scene_speed=self._scene_speed_slider.value() / 100.0,
+                        scene_full_led=full_led)
 
     def _stop_scenes(self):
         if self._scene_engine is not None:
@@ -1439,12 +1527,17 @@ class MainWindow(QMainWindow):
         self._scene_active = False
         self._scene_status_label.setText("Idle")
         self._scene_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
-        self._btn_scene_start.setEnabled(True)
-        self._btn_scene_stop.setEnabled(False)
-        # После остановки анимации возвращаем ленту к выбранному статичному
-        # цвету — иначе она остаётся замороженной на последнем кадре.
-        if was_active and self._driver.connected:
-            self._driver.set_color(self._r, self._g, self._b)
+        if was_active:
+            self._mode_stopped("scene")
+
+    def _mode_stopped(self, mode: str):
+        """Режим завершился (стоп или ошибка): сбрасываем _active_mode
+        и статус, лента гаснет — иначе она замораживается на последнем кадре."""
+        if self._active_mode == mode:
+            self._active_mode = None
+        if self._driver.connected:
+            self._driver.set_color(0, 0, 0)
+        self._update_mode_status()
 
     def _on_scene_frame_ready(self, colors):
         if self._scene_active and self._driver.connected:
@@ -1553,31 +1646,19 @@ class MainWindow(QMainWindow):
         fps_row.addWidget(self._audio_fps_label)
         sens_layout.addLayout(fps_row)
 
-        # Full LED Checkbox
+        # Full LED Checkbox — сохраняется, применяется на лету.
         self._audio_full_led_cb = QCheckBox("Full LED (Использовать все светодиоды)")
-        self._audio_full_led_cb.setChecked(True)
+        self._audio_full_led_cb.setChecked(
+            bool(self._settings.get("audio_full_led", True)))
         self._audio_full_led_cb.setToolTip("Если выключено, анимация будет игнорировать углы без ленты (как в Screen Mirroring).")
+        self._audio_full_led_cb.toggled.connect(self._on_audio_full_led_toggled)
         sens_layout.addWidget(self._audio_full_led_cb)
 
         layout.addWidget(sens_group)
 
-        btn_row = QHBoxLayout()
-        self._btn_audio_start = QPushButton("Start")
-        self._btn_audio_start.setFixedHeight(36)
-        self._btn_audio_start.setStyleSheet(
-            "background-color: #2d8c2d; color: white; font-weight: bold; border-radius: 6px;"
-        )
-        self._btn_audio_start.clicked.connect(self._on_audio_start_clicked)
-        btn_row.addWidget(self._btn_audio_start)
-        self._btn_audio_stop = QPushButton("Stop")
-        self._btn_audio_stop.setFixedHeight(36)
-        self._btn_audio_stop.setStyleSheet(
-            "background-color: #cc3333; color: white; font-weight: bold; border-radius: 6px;"
-        )
-        self._btn_audio_stop.setEnabled(False)
-        self._btn_audio_stop.clicked.connect(self._stop_audio)
-        btn_row.addWidget(self._btn_audio_stop)
-        layout.addLayout(btn_row)
+        hint = QLabel("Запуск/остановка — общей кнопкой (Re)Start внизу окна.")
+        hint.setStyleSheet("color: #6c7086;")
+        layout.addWidget(hint)
         layout.addStretch()
 
     def _on_audio_sens_changed(self):
@@ -1625,12 +1706,12 @@ class MainWindow(QMainWindow):
         if self._audio_active and self._audio_engine is not None and mode in AUDIO_MODES:
             self._audio_engine.set_mode(mode)
             self._update_audio_status_running()
+            self._update_mode_status()
 
-    def _on_audio_start_clicked(self):
-        if not self._driver.connected:
-            QMessageBox.warning(self, "Not connected", "Connect to the controller first.")
-            return
-        self._start_audio(self._audio_mode_combo.currentData(), self._audio_source_combo.currentData())
+    def _on_audio_full_led_toggled(self, checked: bool):
+        self._settings.update(audio_full_led=checked)
+        if self._audio_active and self._audio_engine is not None:
+            self._apply_full_led(self._audio_engine, checked)
 
     def _update_audio_status_running(self):
         if self._audio_active:
@@ -1640,16 +1721,15 @@ class MainWindow(QMainWindow):
             self._audio_status_label.setStyleSheet("color: #2d8c2d; font-weight: bold;")
 
     def _start_audio(self, mode_name: str, device_id):
-        self._stop_audio()
+        self._stop_all_modes()
         self._audio_error_msg = None
         self._audio_thread = QThread()
-        # led_count берём из актуального LED конфига, а не хардкодим
-        actual_led_count = self._led_config_panel.config.total
+        full_led = self._audio_full_led_cb.isChecked()
         fps = self._audio_fps_slider.value()
-        self._audio_engine = AudioEngine(led_count=actual_led_count, fps=fps)
+        self._audio_engine = AudioEngine(
+            led_count=self._mode_led_count(full_led), fps=fps)
 
-        if not self._audio_full_led_cb.isChecked():
-            from soulight.screen_mirroring.layout import build_layout
+        if not full_led:
             layout_data = build_layout(self._led_config_panel.config, 100, 100, 0.08)
             self._audio_engine.set_layout(layout_data.leds)
 
@@ -1660,16 +1740,17 @@ class MainWindow(QMainWindow):
         self._audio_thread.started.connect(lambda: self._audio_engine.start(mode_name, device_id=device_id))
         self._audio_thread.start()
         self._audio_active = True
+        self._active_mode = "audio"
         self._save_mode("audio", audio_mode=mode_name,
                         audio_device=device_id,
-                        audio_fps=self._audio_fps_slider.value())
+                        audio_fps=self._audio_fps_slider.value(),
+                        audio_full_led=full_led)
         self._audio_engine.set_sensitivity(self._audio_sens_slider.value() / 100.0)
         self._audio_engine.set_gain(self._audio_gain_slider.value() / 100.0)
         self._audio_engine.set_color_shift(self._audio_shift_slider.value() / 100.0)
         self._audio_status_label.setText(f"Starting: {MODE_LABELS.get(mode_name, mode_name)}...")
         self._audio_status_label.setStyleSheet("color: #cc9933; font-weight: bold;")
-        self._btn_audio_start.setEnabled(False)
-        self._btn_audio_stop.setEnabled(True)
+        self._btn_mode_stop.setEnabled(True)
         self._driver.set_color(0, 0, 0)
 
     def _stop_audio(self):
@@ -1685,12 +1766,8 @@ class MainWindow(QMainWindow):
         if not getattr(self, "_audio_error_msg", None):
             self._audio_status_label.setText("Idle")
             self._audio_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
-        self._btn_audio_start.setEnabled(True)
-        self._btn_audio_stop.setEnabled(False)
-        # Возвращаем статичный цвет — иначе лента замирает на последнем
-        # аудио-кадре.
-        if was_active and self._driver.connected:
-            self._driver.set_color(self._r, self._g, self._b)
+        if was_active:
+            self._mode_stopped("audio")
 
     def _on_audio_frame_ready(self, colors):
         if self._audio_active and self._driver.connected:
@@ -1933,7 +2010,9 @@ class MainWindow(QMainWindow):
         elif mode == "mirror":
             self._tabs.setCurrentIndex(2)
             self._start_screen_mirroring()
-        # "color" — уже восстановлен через _send_current_color
+        elif mode == "color":
+            self._active_mode = "color"
+            self._send_current_color()
 
     def _save_mode(self, name, **extra):
         self._settings.update(last_mode=name, **extra)
