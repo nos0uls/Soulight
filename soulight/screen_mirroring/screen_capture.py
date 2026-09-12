@@ -5,6 +5,7 @@
 # Его задача простая: вернуть свежий кадр primary monitor в удобном виде.
 
 import ctypes
+import os
 import sys
 import threading
 from dataclasses import dataclass
@@ -78,6 +79,14 @@ except ImportError:
 DXCAM_AVAILABLE = BETTERCAM_AVAILABLE
 
 
+def _is_wayland() -> bool:
+    """Запущены ли мы под Wayland-сессией (mss там захватывает чёрное)."""
+    return (
+        os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
+        or bool(os.environ.get("WAYLAND_DISPLAY"))
+    )
+
+
 # Этот dataclass хранит уже готовый кадр экрана.
 # rgb — numpy array shape (H, W, 3) dtype=uint8, порядок каналов RGB.
 # numpy позволяет делать быстрое среднее по зонам без Python-циклов.
@@ -131,6 +140,15 @@ class ScreenCapturer:
         self._last_edge_regions = None
         self._use_bettercam = BETTERCAM_AVAILABLE and prefer_dxcam
         self._bettercam_failed = False
+        # Wayland/KWin backend: mss на Wayland видит только пустой
+        # XWayland-слой (чёрный кадр). Вместо него используется
+        # org.kde.KWin.ScreenShot2 через session D-Bus (raw пиксели
+        # в pipe, без диалогов). Требует авторизации вызывающего
+        # процесса — см. install_desktop.sh (python-soulight shim).
+        self._kwin_iface = None
+        self._kwin_bus = None
+        self._kwin_checked = False
+        self._kwin_failed = False
         # Эти счётчики нужны только для диагностики.
         # Мы логируем первые удачные вызовы и любые ошибки,
         # чтобы потом было проще понять, где ломается capture lifecycle.
@@ -150,6 +168,14 @@ class ScreenCapturer:
             except Exception:
                 pass
             self._sct = None
+        # Отключаем KWin D-Bus соединение этого потока.
+        if self._kwin_bus is not None:
+            try:
+                self._kwin_bus.disconnectFromBus(self._kwin_bus.name())
+            except Exception:
+                pass
+            self._kwin_bus = None
+            self._kwin_iface = None
         # Освобождаем bettercam camera если был создан.
         if self._bettercam_camera is not None:
             try:
@@ -278,6 +304,21 @@ class ScreenCapturer:
                             pass
                         self._sct = None
         
+        # Wayland: mss видит только XWayland-слой (чёрный кадр) —
+        # пробуем KWin ScreenShot2, если он доступен и процесс
+        # авторизован (desktop-файл с X-KDE-DBUS-Restricted-Interfaces).
+        if _is_wayland() and sys.platform != "win32" and not self._kwin_failed:
+            try:
+                return self._capture_edges_kwin(edge_depth)
+            except Exception as e:
+                self._kwin_failed = True
+                self._debug_log(
+                    "kwin-unavailable",
+                    f"KWin capture failed ({type(e).__name__}: {e}); "
+                    "mss на Wayland возвращает чёрный кадр — для mirroring "
+                    "запустите приложение через ./install_desktop.sh ярлык",
+                )
+
         # MSS fallback path
         return self._capture_edges_mss(edge_depth)
 
@@ -490,6 +531,106 @@ class ScreenCapturer:
             rgb=None,
             edge_regions=edge_regions,
         )
+
+    # KWin ScreenShot2 (Wayland/KDE): один D-Bus вызов CaptureActiveScreen
+    # пишет raw пиксели (ARGB32_Premultiplied, LE = BGRA) в наш pipe.
+    # native-resolution=True → размер в физических пикселях совпадает
+    # с геометрией, которую вернул mss (X11 видит physical размер).
+    # ~40ms на 1920x1080 — примерно 25 FPS, что достаточно для ambilight.
+    # Ограничение: только активный экран (single-monitor сценарий).
+    def _capture_edges_kwin(self, edge_depth: int) -> CaptureFrame:
+        import numpy as np
+
+        self._capture_attempts += 1
+        iface = self._get_kwin_iface()
+
+        r_fd, w_fd = os.pipe2(os.O_CLOEXEC)
+        chunks: list[bytes] = []
+
+        def _drain():
+            try:
+                while True:
+                    b = os.read(r_fd, 1 << 20)
+                    if not b:
+                        break
+                    chunks.append(b)
+            except OSError:
+                pass
+
+        reader = threading.Thread(target=_drain, daemon=True)
+        reader.start()
+        try:
+            from PyQt6.QtDBus import QDBus, QDBusUnixFileDescriptor
+            reply = iface.call(
+                QDBus.CallMode.Block, "CaptureActiveScreen",
+                {"native-resolution": True}, QDBusUnixFileDescriptor(w_fd),
+            )
+        finally:
+            os.close(w_fd)
+        reader.join(timeout=5.0)
+        os.close(r_fd)
+
+        from PyQt6.QtDBus import QDBusMessage
+        if reply.type() == QDBusMessage.MessageType.ErrorMessage:
+            raise RuntimeError(reply.arguments() or ["KWin screenshot failed"])
+
+        info = reply.arguments()[0]
+        fw = int(info["width"])
+        fh = int(info["height"])
+        stride = int(info["stride"])
+        if info.get("type") != "raw" or int(info["format"]) not in (4, 5, 6):
+            raise RuntimeError(f"KWin returned unsupported frame: {info}")
+
+        buf = b"".join(chunks)
+        if len(buf) < stride * fh:
+            raise RuntimeError(f"KWin frame truncated: {len(buf)} < {stride * fh}")
+
+        # BGRA → RGB view на reversed каналах; buf живёт через .base.
+        bgra = np.frombuffer(buf, dtype=np.uint8).reshape(fh, stride)
+        rgb = bgra[:, : fw * 4].reshape(fh, fw, 4)[:, :, 2::-1]
+        d = max(1, min(int(edge_depth), fw, fh))
+        edge_regions = {
+            "top": CaptureRegion(0, 0, fw, d, rgb[:d, :]),
+            "bottom": CaptureRegion(0, fh - d, fw, d, rgb[fh - d:, :]),
+            "left": CaptureRegion(0, 0, d, fh, rgb[:, :d]),
+            "right": CaptureRegion(fw - d, 0, d, fh, rgb[:, fw - d:]),
+        }
+
+        if self._capture_attempts <= 3:
+            self._debug_log(
+                "kwin-edge-capture",
+                (
+                    f"attempt={self._capture_attempts} full={fw}x{fh} "
+                    f"depth={d} screen={info.get('screen')} (ScreenShot2 raw)"
+                ),
+            )
+
+        return CaptureFrame(width=fw, height=fh, rgb=None, edge_regions=edge_regions)
+
+    # Ленивое создание D-Bus интерфейса к KWin в ТЕКУЩЕМ потоке.
+    # QDBusConnection привязана к потоку создания — поэтому именно
+    # connectToBus с уникальным именем, а не sessionBus() (main-thread only).
+    def _get_kwin_iface(self):
+        if self._kwin_iface is not None:
+            return self._kwin_iface
+        from PyQt6.QtDBus import QDBusConnection, QDBusInterface
+        name = f"soulight-cap-{id(self)}-{threading.get_ident()}"
+        bus = QDBusConnection.connectToBus(
+            QDBusConnection.BusType.SessionBus, name
+        )
+        if not bus.isConnected():
+            raise RuntimeError("session D-Bus unavailable")
+        iface = QDBusInterface(
+            "org.kde.KWin.ScreenShot2",
+            "/org/kde/KWin/ScreenShot2",
+            "org.kde.KWin.ScreenShot2",
+            bus,
+        )
+        if not iface.isValid():
+            raise RuntimeError("org.kde.KWin.ScreenShot2 not found (not KWin?)")
+        self._kwin_bus = bus
+        self._kwin_iface = iface
+        return iface
 
     # Внутренний helper для выбора монитора.
     def _get_monitor(self, sct) -> dict:

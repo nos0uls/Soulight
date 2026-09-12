@@ -37,6 +37,7 @@ GUI не нужен — Qt вообще не импортируется (раб�
 python -m soulight --headless --mode color --color FF3300 --brightness 128
 python -m soulight --headless --mode scene --pattern fire --fps 25 --speed 1.5
 python -m soulight --headless --mode audio --audio-mode spectrum --device <id>
+python -m soulight --headless --mode mirror --fps 20   # см. Wayland ниже
 python -m soulight --headless --list-devices     # id устройств вывода/ввода
 python -m soulight --headless --mode off
 ```
@@ -78,6 +79,30 @@ WantedBy=multi-user.target
 - Переходы яркости/цвета/температуры плавные (~0.3с) — вшито в драйвер.
 - Все настройки и последний режим сохраняются в `app_settings.json`
   и восстанавливаются при старте (GUI и `--restore` в headless).
+
+## Wayland / KDE: screen mirroring
+
+mss на Wayland видит только XWayland-слой → чёрный кадр. На KDE Plasma
+используется `org.kde.KWin.ScreenShot2` (raw-кадр по D-Bus, ~25 FPS,
+без диалогов разрешений).
+
+KWin разрешает ScreenShot2 только процессам, у которых desktop-файл с
+`Exec` == `/proc/<pid>/exe` содержит
+`X-KDE-DBUS-Restricted-Interfaces`. `./install_desktop.sh` создаёт
+`python-soulight` — копию бинаря интерпретатора в venv — и скрытый
+desktop-файл под неё (узкий грант: только этот бинарь, не весь python).
+`run_soulight.sh` выбирает shim автоматически.
+
+Для headless-зеркалирования в systemd нужна session-шина:
+
+```ini
+[Service]
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+ExecStart=%h/.venvs/soulight/bin/python-soulight -m soulight --headless --mode mirror
+```
+
+Ограничения: захватывается активный экран; на GNOME/wlroots пока
+fallback на mss (чёрный кадр) — портальный ScreenCast не реализован.
 
 ## Примечания
 

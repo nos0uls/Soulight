@@ -4,18 +4,26 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Порядок: локальный .venv → venv → user-venv (~/.venvs/soulight,
-# нужен когда репо лежит на NTFS и symlink-venv невозможен) → системный.
-if [ -f "$SCRIPT_DIR/.venv/bin/python" ]; then
-    PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
-elif [ -f "$SCRIPT_DIR/venv/bin/python" ]; then
-    PYTHON_BIN="$SCRIPT_DIR/venv/bin/python"
-elif [ -f "$HOME/.venvs/soulight/bin/python" ]; then
-    PYTHON_BIN="$HOME/.venvs/soulight/bin/python"
-elif command -v python3 >/dev/null 2>&1; then
-    PYTHON_BIN="python3"
-else
-    PYTHON_BIN="python"
+# Порядок: для каждого venv сначала ищем shim python-soulight
+# (копия бинаря с KWin-грантом на захват экрана, см. install_desktop.sh),
+# затем обычный python. Кандидаты: локальный .venv → venv →
+# user-venv (~/.venvs/soulight, нужен когда репо на NTFS) → системный.
+PYTHON_BIN=""
+for venv_dir in "$SCRIPT_DIR/.venv" "$SCRIPT_DIR/venv" "$HOME/.venvs/soulight"; do
+    if [ -f "$venv_dir/bin/python-soulight" ]; then
+        PYTHON_BIN="$venv_dir/bin/python-soulight"
+        break
+    elif [ -f "$venv_dir/bin/python" ]; then
+        PYTHON_BIN="$venv_dir/bin/python"
+        break
+    fi
+done
+if [ -z "$PYTHON_BIN" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="python3"
+    else
+        PYTHON_BIN="python"
+    fi
 fi
 
 if [ -t 1 ]; then

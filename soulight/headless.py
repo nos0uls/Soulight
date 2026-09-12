@@ -43,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--headless", action="store_true",
                    help="маркер режима (проставляется __main__)")
-    p.add_argument("--mode", choices=["color", "scene", "audio", "off"],
+    p.add_argument("--mode", choices=["color", "scene", "audio", "mirror", "off"],
                    default="color", help="режим работы (default: color)")
     p.add_argument("--color", default="FF00FF",
                    help="статичный цвет RRGGBB или r,g,b (default: FF00FF)")
@@ -63,6 +63,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "по умолчанию — микрофон")
     p.add_argument("--list-devices", action="store_true",
                    help="показать доступные аудио-источники и выйти")
+    p.add_argument("--monitor", type=int, default=1,
+                   help="индекс монитора для --mode mirror (default: 1)")
+    p.add_argument("--edge", type=float, default=8.0,
+                   help="толщина края экрана для mirror, %% (default: 8)")
     p.add_argument("--port", default=None,
                    help="serial порт (иначе SOULIGHT_PORT/автодетект)")
     p.add_argument("--no-retry", action="store_true",
@@ -125,6 +129,29 @@ def _run_audio(driver, args, config: LEDConfig, stop: threading.Event):
         engine.stop()
 
 
+def _run_mirror(driver, args, config: LEDConfig, stop: threading.Event):
+    """Screen mirroring напрямую через engine — без Qt worker'а.
+    На Wayland/KDE работает через KWin ScreenShot2 (нужен запуск
+    авторизованным бинарём — см. install_desktop.sh и README)."""
+    from soulight.screen_mirroring.engine import ScreenMirrorEngine
+
+    engine = ScreenMirrorEngine(
+        config=config,
+        monitor_index=args.monitor,
+        edge_fraction=max(0.02, min(0.20, args.edge / 100.0)),
+    )
+    engine.rebuild_layout()
+    interval = 1.0 / max(1.0, min(60.0, args.fps))
+    try:
+        while not stop.is_set():
+            t0 = time.perf_counter()
+            res = engine.process_next_frame()
+            driver.set_per_led_colors(res.sampled.physical_colors)
+            stop.wait(max(0.0, interval - (time.perf_counter() - t0)))
+    finally:
+        engine.close()
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
 
@@ -139,7 +166,9 @@ def main(argv=None):
         from soulight.app_settings import AppSettings
         st = AppSettings()
         mode = st.get("last_mode", "color")
-        if mode == "scene":
+        if mode == "mirror":
+            args.mode = "mirror"
+        elif mode == "scene":
             args.mode = "scene"
             args.pattern = st.get("scene_pattern", "rainbow")
             args.speed = st.get("scene_speed", 1.0)
@@ -213,6 +242,9 @@ def main(argv=None):
         elif args.mode == "audio":
             print(f"[headless] audio={args.audio_mode} device={args.device or 'default-mic'} fps={args.fps}")
             _run_audio(driver, args, config, stop)
+        elif args.mode == "mirror":
+            print(f"[headless] mirror monitor={args.monitor} edge={args.edge}% fps={args.fps}")
+            _run_mirror(driver, args, config, stop)
         else:  # off
             driver.set_color(0, 0, 0)
             driver.switch(False)
