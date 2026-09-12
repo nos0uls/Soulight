@@ -7,9 +7,13 @@
 # CryptoObfuscator (обфускатор Beelight.exe) расшифровывает тела методов
 # автоматически при загрузке assembly — поэтому reflection работает.
 
-import clr
 import os
 import sys
+
+try:
+    import clr
+except ImportError:
+    clr = None
 
 # Аппаратный лимит контроллера.
 # Per-LED массив лучше всегда приводить к полной длине,
@@ -17,7 +21,7 @@ import sys
 MAX_PACKET_LEDS = 75
 
 # Путь к директории Beelight (содержит Beelight.exe и все DLL зависимости)
-BEELIGHT_DIR = r"C:\Program Files (x86)\Beelight\Beelight V3.0"
+BEELIGHT_DIR = os.getenv("BEELIGHT_DIR", r"C:\Program Files (x86)\Beelight\Beelight V3.0")
 BEELIGHT_EXE = os.path.join(BEELIGHT_DIR, "Beelight.exe")
 
 
@@ -67,6 +71,10 @@ class BeelightBridge:
         """
         Внутренний метод: загрузка assembly и поиск методов через reflection.
         """
+        if clr is None:
+            print("[Bridge] pythonnet (clr) недоступен. На Linux запуск Beelight.exe требует .NET/Wine.")
+            return False
+
         # Импортируем .NET типы через pythonnet
         from System.Reflection import Assembly, BindingFlags
         from System.IO import Path as NetPath

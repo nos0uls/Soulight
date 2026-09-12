@@ -15,9 +15,7 @@ a = Analysis(
     [str(project_root / 'soulight' / 'app.py')],
     pathex=[str(project_root)],
     binaries=[
-        # .NET DLL для основного bridge
-        (str(project_root / 'beelightLib.dll'), '.'),
-        # Быстрый C# bridge (добавлен второй нейросетью)
+        # Быстрый C# bridge (опционально, только Windows-путь через Beelight.exe)
         (str(project_root / 'dotnet' / 'SoulightBridge.dll'), 'dotnet'),
     ],
     datas=[
@@ -38,6 +36,8 @@ a = Analysis(
         'numpy',
         # Все модули soulight
         'soulight.protocol.bridge',
+        'soulight.protocol.lightprotocol',
+        'soulight.protocol.native_bridge',
         'soulight.protocol.serial_driver',
         'soulight.ui.main_window',
         'soulight.led_config',

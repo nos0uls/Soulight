@@ -5,14 +5,37 @@
 # Background thread непрерывно отправляет brightness + color + heartbeat
 # каждые ~70ms для стабильного горения (контроллер требует постоянного потока).
 
+import os
+import sys
 import threading
 import time
 import serial  # pyserial
+import serial.tools.list_ports
 
 from soulight.protocol.bridge import BeelightBridge
+from soulight.protocol.native_bridge import NativeBridge
+
+
+def get_default_port():
+    env_port = os.getenv("SOULIGHT_PORT")
+    if env_port:
+        return env_port
+    if sys.platform != "win32":
+        try:
+            ports = [p.device for p in serial.tools.list_ports.comports()]
+            for dev in ports:
+                if "ttyUSB" in dev or "ttyACM" in dev:
+                    return dev
+            if ports:
+                return ports[0]
+        except Exception:
+            pass
+        return "/dev/ttyUSB0"
+    return "COM7"
+
 
 # Настройки по умолчанию
-DEFAULT_PORT = "COM7"
+DEFAULT_PORT = get_default_port()
 DEFAULT_BAUD = 500000
 
 # Эти константы описывают только безопасную оценку practical throughput.
@@ -37,14 +60,17 @@ class LEDDriver:
         driver.disconnect()
     """
 
-    def __init__(self, port=DEFAULT_PORT, baud=DEFAULT_BAUD):
+    def __init__(self, port=DEFAULT_PORT, baud=DEFAULT_BAUD, protocol=None):
         # Параметры serial соединения
         self._port_name = port
         self._baud = baud
         # pyserial объект
         self._serial = None
-        # Bridge к Beelight.exe для генерации пакетов
-        self._bridge = BeelightBridge()
+        # Генератор пакетов: BeelightBridge (.NET reflection) или
+        # NativeBridge (чистый Python). Выбор: аргумент protocol
+        # ("beelight"/"native"/"auto"), затем env SOULIGHT_PROTOCOL.
+        self._protocol = (protocol or os.getenv("SOULIGHT_PROTOCOL") or "auto").lower()
+        self._bridge = self._make_bridge()
         # Флаг подключения
         self._connected = False
         # Background send thread — непрерывно шлёт brightness+color+heartbeat
@@ -64,6 +90,28 @@ class LEDDriver:
         self._send_interval = 0.015
         # Heartbeat каждые N color пакетов
         self._hb_every = 10
+
+    def _make_bridge(self):
+        """
+        Выбирает backend генерации пакетов.
+        "native"   — всегда NativeBridge (чистый Python, кроссплатформен).
+        "beelight" — всегда BeelightBridge (нужны Beelight.exe + .NET).
+        "auto"     — BeelightBridge если pythonnet и Beelight.exe доступны,
+                     иначе NativeBridge.
+        """
+        if self._protocol == "native":
+            return NativeBridge()
+        if self._protocol == "beelight":
+            return BeelightBridge()
+        # auto: BeelightBridge если окружение его поддерживает
+        # (pythonnet + Beelight.exe — проверенный путь), иначе NativeBridge.
+        try:
+            from soulight.protocol import bridge as bm
+            if bm.clr is not None and os.path.exists(bm.BEELIGHT_EXE):
+                return BeelightBridge()
+        except Exception:
+            pass
+        return NativeBridge()
 
     @property
     def connected(self):
@@ -207,6 +255,18 @@ class LEDDriver:
         """
         hb = self._bridge.get_heartbeat()
 
+        # Нативный backend повторяет полную стартовую последовательность
+        # оригинального приложения (queries + sync_on + heartbeats).
+        pre = getattr(self._bridge, "handshake_packets", None)
+        if callable(pre):
+            for pkt in pre():
+                self._safe_write(pkt)
+                time.sleep(0.05)
+            try:
+                self._serial.read(self._serial.in_waiting or 1)
+            except Exception:
+                pass
+
         # Heartbeat burst (5x) — пробуждение контроллера
         for _ in range(5):
             self._safe_write(hb)
@@ -308,9 +368,6 @@ class LEDDriver:
     def _safe_write(self, data):
         """
         Потокобезопасная отправка данных через serial.
-        Пакеты с frame header (55 AA 5A) отправляются двумя частями:
-        сначала 5-байтный заголовок, потом payload — контроллер ожидает
-        именно такую последовательность (подтверждено capture анализом).
         Игнорирует None data и ошибки записи.
         """
         if data is None or self._serial is None or not self._serial.is_open:
@@ -318,7 +375,5 @@ class LEDDriver:
         try:
             with self._write_lock:
                 self._serial.write(data)
-                # Убрали искусственное разделение заголовка и паузу 15мс (time.sleep(0.003)),
-                # так как CH340 / USB должен сам справляться с фреймами, а пауза убивала FPS.
         except Exception:
             pass

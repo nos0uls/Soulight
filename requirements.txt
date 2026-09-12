@@ -1,7 +1,9 @@
-pythonnet>=3.0.5
 PyQt6>=6.6
 pyserial>=3.5
 mss>=9.0.1
-dxcam>=0.0.5
 numpy>=1.24
 soundcard>=0.4.4
+# Windows-only: legacy backend через Beelight.exe (pythonnet)
+pythonnet>=3.0.5; sys_platform == "win32"
+# Windows-only: быстрый screen capture через DirectX (иначе mss)
+bettercam>=1.2; sys_platform == "win32"

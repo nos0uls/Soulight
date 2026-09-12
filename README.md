@@ -1,59 +1,39 @@
 # Soulight
 
-Замена Beelight для управления LED лентой Lytmi/Beelight.
-
-Использует LightProtocol команды через .NET reflection из оригинального `Beelight.exe` — полный контроль цвета и яркости без реверса шифрования.
-
-## Возможности
-
-- **Solid Color** — произвольный RGB цвет на всю ленту
-- **Brightness** — регулировка яркости (0-255)
-- **Color Presets** — быстрые пресеты (Red, Green, Blue, Purple, Yellow, Cyan, Orange, White, Warm/Cool White)
-- **HEX ввод** — цвет через #RRGGBB
-- **Dark UI** — тёмная тема (Catppuccin-style)
-
-## Установка
-
-```bash
-pip install -r requirements.txt
-```
-
-Требования:
-- Python 3.10+
-- Windows (нужен .NET Framework 4.x)
-- `Beelight.exe` установлен в `C:\Program Files (x86)\Beelight\Beelight V3.0\`
-- LED контроллер подключён к COM7
+Управление LED-лентой Lytmi/Beelight (контроллер на Artery AT32, USB-CDC,
+500000 baud) — solid color, per-LED, screen mirroring (ambilight), сцены,
+аудио-режимы. PyQt6 GUI, Windows и Linux.
 
 ## Запуск
 
 ```bash
-# GUI приложение
-python -m soulight
-
-# CLI (fallback)
-Soulight.exe 255 0 255 30
+pip install -r requirements.txt
+python -m soulight          # или ./run_soulight.sh (Linux) / run_silent.bat (Windows)
 ```
 
-## Структура
+## Протокол (LightProtocol)
+
+Wire-формат реконструирован из `Beelight.exe` (de4dot) и подтверждён на
+железе — оригинальное приложение не требуется:
 
 ```
-soulight/
-  protocol/
-    bridge.py         # pythonnet мост к Beelight.exe
-    serial_driver.py  # Serial + continuous send loop
-  ui/
-    main_window.py    # PyQt6 главное окно
-  app.py              # Точка входа
+frame = 55 AA 5A <len u16le> + body
+body  = [cksum][pad^0x31][key:pad][attr^key0][cmd^key1][data^key...]
+cksum = sum(body[1:]) & 0xFF;  key случаен;  pad = 3..10
 ```
 
-## Архитектура
+Реализация: `soulight/protocol/lightprotocol.py` (кодек) +
+`native_bridge.py` (drop-in замена .NET-моста).
 
-```
-PyQt6 UI  →  LEDDriver  →  BeelightBridge (pythonnet/.NET)  →  Serial COM7
-                                    ↓
-                            Beelight.exe (reflection)
-                            GenColorPackage()
-                            GenBrightPackage()
-```
+Выбор backend: `SOULIGHT_PROTOCOL=native|beelight|auto` (default `auto` —
+native если нет pythonnet+Beelight.exe). Порт: `SOULIGHT_PORT` или
+автодетект (`ttyUSB*`/`ttyACM*` на Linux, `COM7` на Windows).
 
-Beelight.exe обфусцирован CryptoObfuscator, но расшифровывает method bodies при загрузке через `Assembly.LoadFrom()`. Методы LightProtocol генерируют готовые wire-format пакеты (`55 AA 5A ...`).
+## Примечания
+
+- Контроллер просыпается по DTR+RTS; на Linux нужен доступ к порту
+  (`sudo usermod -aG dialout $USER`).
+- Screen capture: `bettercam` (Windows) → fallback `mss`.
+- `dotnet/SoulightBridge.dll` — опциональный fast-path для legacy backend.
+- Тесты: `python -m unittest tests.test_native_protocol` (включая валидацию
+  по реальному capture `tests/replay.csv`).
