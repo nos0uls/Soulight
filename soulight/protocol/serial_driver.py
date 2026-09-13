@@ -290,8 +290,11 @@ class LEDDriver:
             return
         try:
             buf = [(int(r), int(g), int(b)) for r, g, b in colors_rgb]
-        except (TypeError, ValueError):
-            return  # кривой кадр не должен убивать send-loop
+        except (TypeError, ValueError) as e:
+            # Кривой кадр не должен убивать send-loop, но и не должен
+            # исчезать молча — раньше это выглядело как «preview не работает».
+            print(f"[Driver] set_per_led_colors: отброшен кадр: {e}")
+            return
         self._current_per_led = buf
         self._per_led_version += 1
 

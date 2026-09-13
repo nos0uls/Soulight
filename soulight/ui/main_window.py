@@ -1263,7 +1263,10 @@ class MainWindow(QMainWindow):
         self._active_mode = None
         self._save_mode("off")
         if self._driver.connected:
-            self._driver.set_color(self._r, self._g, self._b)
+            if self._preview_owns_strip():
+                self._send_led_config_preview()
+            else:
+                self._driver.set_color(self._r, self._g, self._b)
         self._update_mode_status()
 
     def _stop_all_modes(self):
@@ -1291,6 +1294,14 @@ class MainWindow(QMainWindow):
         self._slider_b.setValue(color.blue())
         # setValue триггерит _on_slider_changed → preview + preset save.
         # Если активен режим Color — цвет уйдёт на ленту сразу.
+
+    def _preview_owns_strip(self):
+        """Live Preview из LED Config владеет лентой в idle-режиме.
+        Пока он включён, solid-color пакеты (set_color) не должны
+        сбивать per-led буфер — иначе лента моргает между preview
+        и сохранённым цветом при каждом касании цветовых контролов."""
+        return (self._active_mode is None
+                and self._led_config_panel.live_preview)
 
     def _on_led_config_preview(self):
         """Live Preview из LED Config — только когда нет активного режима."""
@@ -1521,7 +1532,8 @@ class MainWindow(QMainWindow):
         # Resting color: лента показывает сохранённый цвет в idle и в
         # режиме Color. Во время динамических режимов не трогаем драйвер —
         # set_color очистил бы per-led буфер и убил бы работающий режим.
-        if self._driver.connected and self._active_mode in (None, "color"):
+        if (self._driver.connected and self._active_mode in (None, "color")
+                and not self._preview_owns_strip()):
             self._driver.set_color(self._r, self._g, self._b)
             self._update_mode_status()
 
@@ -1674,7 +1686,10 @@ class MainWindow(QMainWindow):
             return
         self._active_mode = None
         if self._driver.connected:
-            self._driver.set_color(self._r, self._g, self._b)
+            if self._preview_owns_strip():
+                self._send_led_config_preview()
+            else:
+                self._driver.set_color(self._r, self._g, self._b)
         self._update_mode_status()
 
     def _on_scene_frame_ready(self, colors):
