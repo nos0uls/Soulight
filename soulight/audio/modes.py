@@ -78,6 +78,22 @@ def _energy_sum(magnitudes: np.ndarray, freq_bins: np.ndarray, low_hz: float, hi
     return float(np.sum(magnitudes[mask]))
 
 
+def _auto_gain(value: float, key: str, params: dict,
+               floor: float = 20.0, decay: float = 0.97) -> float:
+    """
+    Нормировка энергии на бегущий пик: 1.0 = уровень недавнего максимума.
+    Делает режимы независимыми от абсолютной громкости источника —
+    реагируют на динамику, а не на raw FFT-шкалу (которая у реального
+    loopback оказалась в ~10x ниже, чем ждали старые делители).
+    floor — абсолютный порог тишины в raw-единицах: без него
+    нормализация «разгоняла» бы шумовую полку до полной яркости.
+    """
+    hist = params.setdefault("history", {})
+    peak = max(hist.get(key, 0.0) * decay, value, floor)
+    hist[key] = peak
+    return _clampf(value / peak)
+
+
 # ---------------------------------------------------------------------------
 # Режимы
 # ---------------------------------------------------------------------------
@@ -117,10 +133,17 @@ def spectrum(
     )
     sampled_mags = mags[nearest] * sensitivity * gain
 
+    # Адаптивная шкала: tanh нормируется на бегущий пик спектра,
+    # а не на фиксированные 60 — иначе тихий/громкий источник даёт
+    # стабильно тусклую или стабильно пересвеченную картину.
+    _auto_gain(float(np.max(sampled_mags)), "spec_peak", params,
+               floor=5.0, decay=0.985)
+    peak = max(float(params["history"]["spec_peak"]), 1e-3)
+
     colors = []
     hue_shift = float(params.get("color_shift", 0.0))
     for i, mag in enumerate(sampled_mags):
-        value = math.tanh(mag / 60.0)
+        value = math.tanh(mag / peak * 2.0)
         value = _smooth(value, f"spec_{i}", params, 0.35)
         hue = (i / led_count + hue_shift) % 1.0
         sat = 0.9 + value * 0.1
@@ -146,13 +169,13 @@ def electronic(
     if freq_bins.size < 2 or mags.size < 2:
         return [(0, 0, 0)] * led_count
 
-    bass = _energy_sum(mags, freq_bins, 20, 250) * sensitivity * gain / 1200.0
-    mid = _energy_sum(mags, freq_bins, 250, 4000) * sensitivity * gain / 2500.0
-    treble = _energy_sum(mags, freq_bins, 4000, max(8000.0, freq_bins[-1])) * sensitivity * gain / 1200.0
-
-    bass = _clampf(bass)
-    mid = _clampf(mid)
-    treble = _clampf(treble)
+    bass = _auto_gain(_energy_sum(mags, freq_bins, 20, 250) * sensitivity * gain,
+                      "bass_raw", params)
+    mid = _auto_gain(_energy_sum(mags, freq_bins, 250, 4000) * sensitivity * gain,
+                     "mid_raw", params)
+    treble = _auto_gain(
+        _energy_sum(mags, freq_bins, 4000, max(8000.0, freq_bins[-1])) * sensitivity * gain,
+        "treble_raw", params)
 
     bass = _smooth(bass, "bass", params, 0.35)
     mid = _smooth(mid, "mid", params, 0.35)
@@ -200,7 +223,7 @@ def lyricism(
         centroid = float(np.sum(freq_bins * mags) / total)
 
     avg = float(np.mean(mags)) * sensitivity * gain
-    energy = _clampf(avg / 40.0)
+    energy = _auto_gain(avg, "avg_raw", params, floor=2.0)
     energy = _smooth(energy, "energy", params, 0.25)
 
     hue = (math.log10(max(100.0, centroid)) - 2.0) / 2.0
@@ -232,8 +255,9 @@ def pulse(
     if freq_bins.size < 2 or mags.size < 2:
         return [(0, 0, 0)] * led_count
 
-    bass = _energy_sum(mags, freq_bins, 20, 250) * sensitivity * gain / 1000.0
-    pulse_raw = _clampf(bass)
+    bass = _auto_gain(_energy_sum(mags, freq_bins, 20, 250) * sensitivity * gain,
+                      "bass_raw", params)
+    pulse_raw = bass
     pulse = _smooth(pulse_raw, "pulse", params, 0.45)
 
     history = params.setdefault("history", {})
@@ -284,8 +308,12 @@ def wave(
     xi, log_x = _WAVE_CACHE[cache_key]
     sampled = np.interp(xi, log_x, mags * sensitivity * gain)
     sampled = np.maximum(sampled - np.mean(sampled) * 0.3, 0.0)
-    if np.max(sampled) > 0:
-        sampled = sampled / (np.max(sampled) + 1e-6)
+    peak = float(np.max(sampled))
+    # Без порога self-normalize разгоняет шумовую полку тишины до
+    # полной яркости — лента светится в отсутствие звука.
+    if peak < 1.0:
+        return [(0, 0, 0)] * led_count
+    sampled = sampled / peak
 
     colors = []
     hue_shift = float(params.get("color_shift", 0.0))
@@ -314,8 +342,10 @@ def bass(
     if freq_bins.size < 2 or mags.size < 2:
         return [(0, 0, 0)] * led_count
 
-    bass = _energy_sum(mags, freq_bins, 20, 250) * sensitivity * gain / 1200.0
-    sub = _energy_sum(mags, freq_bins, 20, 100) * sensitivity * gain / 600.0
+    bass = _auto_gain(_energy_sum(mags, freq_bins, 20, 250) * sensitivity * gain,
+                      "bass_raw", params)
+    sub = _auto_gain(_energy_sum(mags, freq_bins, 20, 100) * sensitivity * gain,
+                     "sub_raw", params)
 
     energy = _clampf(bass + sub * 0.5)
     energy = _smooth(energy, "bass_energy", params, 0.3)
@@ -346,17 +376,17 @@ def disco(
     if freq_bins.size < 2 or mags.size < 2:
         return [(0, 0, 0)] * led_count
 
-    bass = _energy_sum(mags, freq_bins, 20, 250) * sensitivity * gain / 1000.0
+    raw_bass = _energy_sum(mags, freq_bins, 20, 250) * sensitivity * gain
+    bass = _auto_gain(raw_bass, "bass_raw", params)
     history = params.setdefault("history", {})
-    prev = history.get("prev_bass", 0.0)
-    current = _clampf(bass)
-    history["prev_bass"] = current
-
-    threshold = 0.55
-    flash = 1.0 if current > threshold and (current - prev) > 0.12 else 0.0
+    # Вспышка на транзиенте: мгновенная raw-энергия выше сглаженного
+    # фона. Нормированный bass тут только как индикатор «музыка играет» —
+    # delta-условие по нему не работает: auto-gain держит его у ~1.0.
+    baseline = _smooth(raw_bass, "disco_base", params, 0.25)
+    flash = 1.0 if (bass > 0.5 and raw_bass > baseline * 1.35) else 0.0
     flash = _smooth(flash, "flash", params, 0.55)
 
-    hue_acc = (history.get("hue_acc", 0.0) + current * 0.015) % 1.0
+    hue_acc = (history.get("hue_acc", 0.0) + bass * 0.015) % 1.0
     history["hue_acc"] = hue_acc
     hue = (hue_acc + float(params.get("color_shift", 0.0))) % 1.0
 

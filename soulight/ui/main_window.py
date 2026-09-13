@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QLabel, QSlider, QPushButton, QLineEdit, QGridLayout,
     QGroupBox, QFrame, QMessageBox, QTabWidget,
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox, QTimeEdit,
-    QColorDialog,
+    QColorDialog, QProgressBar,
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QTime
 from PyQt6.QtGui import QColor, QPainter, QFont
@@ -1745,6 +1745,23 @@ class MainWindow(QMainWindow):
         mode_row.addWidget(self._audio_mode_combo)
         mode_layout.addLayout(mode_row)
 
+        # Input level — показывает, слышит ли выбранный источник звук.
+        # Плоский бар: если он на нуле — причина «молчит лента» в источнике,
+        # а не в режиме/движке.
+        level_row = QHBoxLayout()
+        level_row.addWidget(QLabel("Input:"))
+        self._audio_level_bar = QProgressBar()
+        self._audio_level_bar.setRange(0, 100)
+        self._audio_level_bar.setValue(0)
+        self._audio_level_bar.setTextVisible(False)
+        self._audio_level_bar.setFixedHeight(10)
+        self._audio_level_bar.setToolTip(
+            "Уровень входного сигнала. На нуле — источник не слышит звук:\n"
+            "выберите Output-монитор ваших колонок или другой микрофон."
+        )
+        level_row.addWidget(self._audio_level_bar, stretch=1)
+        mode_layout.addLayout(level_row)
+
         layout.addWidget(mode_group)
 
         sens_group = QGroupBox("Options")
@@ -1897,6 +1914,7 @@ class MainWindow(QMainWindow):
         engine.frame_ready.connect(self._on_audio_frame_ready)
         engine.error_occurred.connect(self._on_audio_error)
         engine.status_changed.connect(self._on_audio_status_changed)
+        engine.level_changed.connect(self._on_audio_level)
         self._audio_thread.started.connect(lambda: engine.start(mode_name, device_id=device_id))
         self._audio_thread.start()
         self._audio_active = True
@@ -1922,6 +1940,7 @@ class MainWindow(QMainWindow):
             self._audio_thread = None
         was_active = self._audio_active
         self._audio_active = False
+        self._audio_level_bar.setValue(0)
         if not getattr(self, "_audio_error_msg", None):
             self._audio_status_label.setText("Idle")
             self._audio_status_label.setStyleSheet("color: #9399b2; font-weight: bold;")
@@ -1944,6 +1963,10 @@ class MainWindow(QMainWindow):
         # Восстанавливаем сообщение после _stop_audio, который ставит "Idle"
         self._audio_status_label.setText(self._audio_error_msg)
         self._audio_status_label.setStyleSheet("color: #f38ba8; font-weight: bold;")
+
+    def _on_audio_level(self, level: float):
+        """Индикатор входного уровня — обновляется из audio thread."""
+        self._audio_level_bar.setValue(int(level * 100))
 
     def _on_audio_status_changed(self, status):
         if self.sender() is not self._audio_engine:

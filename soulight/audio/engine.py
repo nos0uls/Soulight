@@ -27,6 +27,11 @@ except ImportError:
     SOUNDCARD_AVAILABLE = False
 
 
+# Специальные id источников (резолвятся в AudioEngine):
+DEFAULT_SOURCE = "__default__"   # системный звук — монитор выхода по умолчанию
+MIC_SOURCE = "__mic__"           # микрофон по умолчанию
+
+
 def list_capture_devices():
     """
     Список источников захвата для UI: [(id, label, is_loopback), ...].
@@ -34,9 +39,14 @@ def list_capture_devices():
     is_loopback=True — монитор устройства ВЫВОДА (системный звук этого
     выхода): на Windows это WASAPI loopback, на Linux — PulseAudio/PipeWire
     monitor source. is_loopback=False — обычный микрофон/вход.
-    Первый элемент всегда None = default microphone.
+    Первый элемент — DEFAULT_SOURCE = звук системного выхода по умолчанию:
+    для музыкальной реакции это почти всегда то, что нужно (микрофон
+    в качестве дефолта почти гарантированно даёт тишину на ленте).
     """
-    devices = [(None, "Default Microphone", False)]
+    devices = [
+        (DEFAULT_SOURCE, "System audio (default output)", True),
+        (MIC_SOURCE, "Default Microphone", False),
+    ]
     if not SOUNDCARD_AVAILABLE:
         return devices
     try:
@@ -47,9 +57,37 @@ def list_capture_devices():
     except Exception:
         pass
     # Loopback-устройства первыми (пользователь обычно хочет звук с выхода)
-    head, tail = devices[:1], devices[1:]
+    head, tail = devices[:2], devices[2:]
     tail.sort(key=lambda d: (not d[2], d[1]))
     return head + tail
+
+
+def _default_output_monitor():
+    """
+    Loopback-монитор устройства вывода по умолчанию.
+    Windows: get_microphone(speaker.id, include_loopback=True).
+    Linux/Pulse: monitor source имеет id "<sink>.monitor" — id не совпадает,
+    ищем по нему или по имени. None, если монитор не найден.
+    """
+    try:
+        sp = sc.default_speaker()
+    except Exception:
+        return None
+    try:
+        mic = sc.get_microphone(sp.id, include_loopback=True)
+        if getattr(mic, "isloopback", False):
+            return mic
+    except Exception:
+        pass
+    try:
+        want = f"{sp.id}.monitor"
+        for mic in sc.all_microphones(include_loopback=True):
+            if getattr(mic, "isloopback", False) and (
+                    mic.id == want or sp.name in mic.name):
+                return mic
+    except Exception:
+        pass
+    return None
 
 
 # Windows-only: инициализация COM в аудио-потоке для WASAPI.
@@ -83,6 +121,8 @@ class AudioEngine(QObject):
     frame_ready = pyqtSignal(list)
     error_occurred = pyqtSignal(str)
     status_changed = pyqtSignal(str)
+    # Уровень входного сигнала 0..1 — индикатор «источник слышит звук».
+    level_changed = pyqtSignal(float)
 
     def __init__(
         self,
@@ -161,11 +201,24 @@ class AudioEngine(QObject):
         self._led_count = max(1, int(led_count))
         self._layout_leds = layout_leds
 
+    def _resolve_device(self):
+        """device_id → soundcard-устройство захвата."""
+        dev = self._device_id
+        if dev in (None, DEFAULT_SOURCE):
+            mic = _default_output_monitor()
+            if mic is not None:
+                return mic
+            self.status_changed.emit("No loopback — using microphone")
+            return sc.default_microphone()
+        if dev == MIC_SOURCE:
+            return sc.default_microphone()
+        return sc.get_microphone(dev, include_loopback=True)
+
     def start(self, mode_name: str, device_id: Optional[str] = None, params: Optional[dict] = None):
         """
         Запускает захват. device_id — id устройства из list_capture_devices():
-        None = микрофон по умолчанию, иначе конкретный вход или
-        loopback-монитор выбранного устройства вывода.
+        None/DEFAULT_SOURCE = монитор системного выхода (звук колонок),
+        MIC_SOURCE = микрофон по умолчанию, иначе конкретное устройство.
         """
         if not SOUNDCARD_AVAILABLE:
             self.error_occurred.emit("soundcard не установлен. Установите: pip install soundcard")
@@ -212,13 +265,8 @@ class AudioEngine(QObject):
         com_owned = _init_com_for_thread()
         self.status_changed.emit("Capturing...")
         try:
-            if self._device_id is not None:
-                # Выбранное устройство: loopback-монитор устройства вывода
-                # или конкретный микрофон — по id из all_microphones().
-                mic = sc.get_microphone(self._device_id, include_loopback=True)
-            else:
-                # Микрофон по умолчанию
-                mic = sc.default_microphone()
+            mic = self._resolve_device()
+            self.status_changed.emit(f"Capturing: {mic.name}")
 
             with mic.recorder(samplerate=self._sample_rate, channels=1, blocksize=self._block_size) as recorder:
                 while not self._stop_event.is_set():
@@ -227,6 +275,14 @@ class AudioEngine(QObject):
                     # Читаем аудио
                     chunk = recorder.record(numframes=self._block_size)
                     chunk = chunk.flatten()
+
+                    # Уровень входа до обработки — диагностика «молчит
+                    # ли источник» и индикатор в UI. RMS ~0.05-0.15 =
+                    # обычная громкость системного выхода.
+                    if chunk.size:
+                        rms = float(np.sqrt(np.mean(
+                            chunk.astype(np.float32) ** 2)))
+                        self.level_changed.emit(min(1.0, rms * 8.0))
 
                     if self._mode_name is not None:
                         mode_fn = AUDIO_MODES.get(self._mode_name)

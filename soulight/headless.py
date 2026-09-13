@@ -60,7 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "wave, bass, disco)")
     p.add_argument("--device", default=None,
                    help="id аудио-устройства (см. --list-devices); "
-                        "по умолчанию — микрофон")
+                        "по умолчанию — системный звук (монитор выхода), "
+                        "'__mic__' — микрофон по умолчанию")
     p.add_argument("--list-devices", action="store_true",
                    help="показать доступные аудио-источники и выйти")
     p.add_argument("--monitor", type=int, default=1,
@@ -122,6 +123,7 @@ def _run_scene(driver, args, config: LEDConfig, stop: threading.Event):
 
 def _run_audio(driver, args, config: LEDConfig, stop: threading.Event):
     """Аудио через AudioEngine (QtCore только, DISPLAY не нужен)."""
+    from PyQt6.QtCore import Qt
     from soulight.audio.engine import AudioEngine, AUDIO_MODES
 
     if args.audio_mode not in AUDIO_MODES:
@@ -133,8 +135,22 @@ def _run_audio(driver, args, config: LEDConfig, stop: threading.Event):
         led_count=_mode_led_count(config, args.full_led), fps=args.fps)
     if not args.full_led:
         engine.set_layout(_layout_leds(config))
-    engine.frame_ready.connect(driver.set_per_led_colors)
-    engine.error_occurred.connect(lambda m: print(f"[audio] {m}", file=sys.stderr))
+    # В headless нет Qt event loop — auto/queued сигналы из worker-потока
+    # терялись бы в никуда. DirectConnection исполняет слот в потоке
+    # эмиттера; set_per_led_colors потокобезопасен (атомарный буфер).
+    engine.frame_ready.connect(driver.set_per_led_colors,
+                               Qt.ConnectionType.DirectConnection)
+    engine.error_occurred.connect(
+        lambda m: print(f"[audio] {m}", file=sys.stderr),
+        Qt.ConnectionType.DirectConnection)
+    # Уровень входа — периодический print, видно, слышит ли источник звук.
+    _lvl_last = [0.0]
+    def _on_level(v):
+        now = time.time()
+        if now - _lvl_last[0] > 2.0:
+            _lvl_last[0] = now
+            print(f"[audio] input level={v:.2f}")
+    engine.level_changed.connect(_on_level, Qt.ConnectionType.DirectConnection)
     engine.start(args.audio_mode, device_id=args.device)
     try:
         stop.wait()
