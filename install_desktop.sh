@@ -67,8 +67,8 @@ fi
 # Порт создаётся как root:dialout 0660; без правила обычный пользователь
 # получает EACCES. uaccess-ACL выдаёт доступ активной сессии без
 # добавления в группу и без relogin.
-RULE_SRC="$SCRIPT_DIR/99-soulight-serial.rules"
-RULE_DST="/etc/udev/rules.d/99-soulight-serial.rules"
+RULE_SRC="$SCRIPT_DIR/71-soulight-serial.rules"
+RULE_DST="/etc/udev/rules.d/71-soulight-serial.rules"
 if [ -f "$RULE_SRC" ]; then
     if ! cmp -s "$RULE_SRC" "$RULE_DST" 2>/dev/null; then
         if [ -w /etc/udev/rules.d ]; then

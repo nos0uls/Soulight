@@ -1,0 +1,14 @@
+# Soulight / Beelight контроллер — Artery AT32 Virtual Com Port
+# (CDC ACM, VID 2e3c / PID 5740).
+#
+# ВАЖНО: номер 71 < 73 — uaccess-тег должен стоять ДО 73-seat-late.rules,
+# где выполняется builtin 'uaccess' (выдача ACL активному пользователю).
+# Правило с номером 99 добавляло тег слишком поздно — ACL не выдавался.
+#
+# SYMLINK+="soulight" — стабильное имя /dev/soulight независимо от
+# номера ttyACM (удобно для автозапуска/headless).
+# ID_MM_DEVICE_IGNORE — ModemManager не будет пробовать порт как модем
+# и не будет кратковременно держать его при каждом replug.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e3c", ATTRS{idProduct}=="5740", \
+    TAG+="uaccess", GROUP="dialout", MODE="0660", \
+    SYMLINK+="soulight", ENV{ID_MM_DEVICE_IGNORE}="1"

@@ -1,6 +1,0 @@
-# Soulight / Beelight контроллер — AT32 Virtual Com Port (CDC ACM).
-# uaccess: logind выдаёт rw-ACL активному пользователю сессии — без
-# добавления в группу dialout и без relogin. GROUP/MODE — запасной
-# путь для систем без logind.
-SUBSYSTEM=="tty", ATTRS{idVendor}=="2e3c", ATTRS{idProduct}=="5740", \
-    TAG+="uaccess", GROUP="dialout", MODE="0660"
