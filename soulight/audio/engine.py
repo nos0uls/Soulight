@@ -9,6 +9,8 @@
 # Возможно протестировать полностью только с реальным LED-контроллером.
 
 import ctypes
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -255,6 +257,105 @@ class AudioEngine(QObject):
         spectrum = np.fft.rfft(chunk * window)
         return np.abs(spectrum), freq_bins
 
+    def _process_chunk(self, chunk: np.ndarray):
+        """Общий пайплайн одного аудио-блока: level → FFT → mode → маска."""
+        # Уровень входа до обработки — диагностика «молчит ли источник»
+        # и индикатор в UI. RMS ~0.05-0.15 = обычная громкость выхода.
+        if chunk.size:
+            rms = float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2)))
+            self.level_changed.emit(min(1.0, rms * 8.0))
+
+        if self._mode_name is None:
+            return
+        mode_fn = AUDIO_MODES.get(self._mode_name)
+        if mode_fn is None:
+            return
+        mags, freq_bins = self._compute_fft(chunk)
+        colors = mode_fn(
+            magnitudes=mags,
+            freq_bins=freq_bins,
+            led_count=self._led_count,
+            params=self._mode_params,
+        )
+        if self._layout_leds:
+            for led in self._layout_leds:
+                if not led.enabled and led.logical_index < len(colors):
+                    colors[led.logical_index] = (0, 0, 0)
+        self.frame_ready.emit(colors)
+
+    def _throttle(self, loop_start: float):
+        """Точный sleep с учётом времени обработки кадра."""
+        elapsed = time.perf_counter() - loop_start
+        sleep_time = max(0.0, self._interval - elapsed)
+        if sleep_time > 0:
+            self._stop_event.wait(sleep_time)
+
+    def _parec_source(self):
+        """device_id → (pulse source name, label для статуса)."""
+        dev = self._device_id
+        if dev in (None, DEFAULT_SOURCE):
+            sink = subprocess.check_output(
+                ["pactl", "get-default-sink"], text=True, timeout=3).strip()
+            return f"{sink}.monitor", f"System audio ({sink})"
+        if dev == MIC_SOURCE:
+            return "@DEFAULT_SOURCE@", "Default Microphone"
+        # На Linux id из list_capture_devices — это уже имя pulse-источника.
+        return dev, dev
+
+    def _run_parec(self) -> bool:
+        """
+        Linux fast-path: захват через parec (pulseaudio-utils) с
+        --latency-msec=5. Замерено: ~8-13мс от звука до данных против
+        ~55-80мс у soundcard/PulseAudio-буфера по умолчанию.
+        Возвращает False только если parec вообще не смог стартовать —
+        тогда вызывающий код идёт в soundcard-fallback.
+        """
+        if not sys.platform.startswith("linux") or shutil.which("parec") is None:
+            return False
+        try:
+            src, label = self._parec_source()
+        except Exception:
+            return False
+        try:
+            proc = subprocess.Popen(
+                ["parec", "-d", src, "--format=float32le",
+                 "--rate", str(self._sample_rate), "--channels", "1",
+                 "--latency-msec=5"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
+        except Exception:
+            return False
+
+        self.status_changed.emit(f"Capturing: {label}")
+        need = self._block_size * 4  # float32 mono
+        buf = b""
+        frames = 0
+        try:
+            while not self._stop_event.is_set():
+                loop_start = time.perf_counter()
+                data = proc.stdout.read(need - len(buf))
+                if data:
+                    buf += data
+                elif proc.poll() is not None:
+                    if frames == 0:
+                        return False  # источник не открылся — fallback
+                    raise RuntimeError("parec exited mid-run")
+                if len(buf) < need:
+                    continue
+                chunk = np.frombuffer(buf[:need], dtype=np.float32)
+                buf = buf[need:]
+                frames += 1
+                self._process_chunk(chunk)
+                self._throttle(loop_start)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1.0)
+            except Exception:
+                proc.kill()
+        return True
+
     def _run_loop(self):
         # ВАЖНО: soundcard на Windows открывает WASAPI-устройства.
         # WASAPI требует COM в потоке. Без этой инициализации loopback
@@ -265,48 +366,17 @@ class AudioEngine(QObject):
         com_owned = _init_com_for_thread()
         self.status_changed.emit("Capturing...")
         try:
+            if self._run_parec():
+                return
             mic = self._resolve_device()
             self.status_changed.emit(f"Capturing: {mic.name}")
 
             with mic.recorder(samplerate=self._sample_rate, channels=1, blocksize=self._block_size) as recorder:
                 while not self._stop_event.is_set():
                     loop_start = time.perf_counter()
-
-                    # Читаем аудио
                     chunk = recorder.record(numframes=self._block_size)
-                    chunk = chunk.flatten()
-
-                    # Уровень входа до обработки — диагностика «молчит
-                    # ли источник» и индикатор в UI. RMS ~0.05-0.15 =
-                    # обычная громкость системного выхода.
-                    if chunk.size:
-                        rms = float(np.sqrt(np.mean(
-                            chunk.astype(np.float32) ** 2)))
-                        self.level_changed.emit(min(1.0, rms * 8.0))
-
-                    if self._mode_name is not None:
-                        mode_fn = AUDIO_MODES.get(self._mode_name)
-                        if mode_fn is not None:
-                            mags, freq_bins = self._compute_fft(chunk)
-                            colors = mode_fn(
-                                magnitudes=mags,
-                                freq_bins=freq_bins,
-                                led_count=self._led_count,
-                                params=self._mode_params,
-                            )
-
-                            if self._layout_leds:
-                                for led in self._layout_leds:
-                                    if not led.enabled and led.logical_index < len(colors):
-                                        colors[led.logical_index] = (0, 0, 0)
-
-                            self.frame_ready.emit(colors)
-
-                    # Точный sleep с учётом времени обработки
-                    elapsed = time.perf_counter() - loop_start
-                    sleep_time = max(0.0, self._interval - elapsed)
-                    if sleep_time > 0:
-                        self._stop_event.wait(sleep_time)
+                    self._process_chunk(chunk.flatten())
+                    self._throttle(loop_start)
 
         except Exception as e:
             self.error_occurred.emit(f"Audio error: {e}")
