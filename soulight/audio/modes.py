@@ -79,19 +79,26 @@ def _energy_sum(magnitudes: np.ndarray, freq_bins: np.ndarray, low_hz: float, hi
 
 
 def _auto_gain(value: float, key: str, params: dict,
-               floor: float = 20.0, decay: float = 0.97) -> float:
+               floor: float = 20.0, decay: float = 0.985) -> float:
     """
     Нормировка энергии на бегущий пик: 1.0 = уровень недавнего максимума.
     Делает режимы независимыми от абсолютной громкости источника —
     реагируют на динамику, а не на raw FFT-шкалу (которая у реального
     loopback оказалась в ~10x ниже, чем ждали старые делители).
-    floor — абсолютный порог тишины в raw-единицах: без него
-    нормализация «разгоняла» бы шумовую полку до полной яркости.
+
+    floor — шумовой гейт: значения ниже него отдают 0 и НЕ обновляют
+    пик. Иначе пик за пару секунд тишины затухал до шумовой полки,
+    и лента «светилась» на шум — именно это выглядело как реакция
+    на музыку после её остановки.
+    Показатель 1.25 придавливает середину: тихие звуки не заливаются
+    в полную яркость, чувствительность мягче.
     """
     hist = params.setdefault("history", {})
+    if value < floor:
+        return 0.0
     peak = max(hist.get(key, 0.0) * decay, value, floor)
     hist[key] = peak
-    return _clampf(value / peak)
+    return _clampf((value / peak) ** 1.25)
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +143,11 @@ def spectrum(
     # Адаптивная шкала: tanh нормируется на бегущий пик спектра,
     # а не на фиксированные 60 — иначе тихий/громкий источник даёт
     # стабильно тусклую или стабильно пересвеченную картину.
-    _auto_gain(float(np.max(sampled_mags)), "spec_peak", params,
-               floor=5.0, decay=0.985)
+    # Ниже гейта (тишина) — сразу тёмная лента, без residual-мерцания.
+    spec_max = float(np.max(sampled_mags))
+    if spec_max < 5.0:
+        return [(0, 0, 0)] * led_count
+    _auto_gain(spec_max, "spec_peak", params, floor=5.0, decay=0.985)
     peak = max(float(params["history"]["spec_peak"]), 1e-3)
 
     colors = []
@@ -222,8 +232,10 @@ def lyricism(
     else:
         centroid = float(np.sum(freq_bins * mags) / total)
 
+    # Средняя энергия по всем бинам — тихая величина (большинство
+    # бинов ~0 даже в музыке), поэтому гейт ниже, чем у band-сумм.
     avg = float(np.mean(mags)) * sensitivity * gain
-    energy = _auto_gain(avg, "avg_raw", params, floor=2.0)
+    energy = _auto_gain(avg, "avg_raw", params, floor=0.8)
     energy = _smooth(energy, "energy", params, 0.25)
 
     hue = (math.log10(max(100.0, centroid)) - 2.0) / 2.0
