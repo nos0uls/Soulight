@@ -197,6 +197,10 @@ class LEDDriver:
             self._serial.read(self._serial.in_waiting or 1)
         except serial.SerialException as e:
             print(f"[Driver] Не удалось открыть {self._port_name}: {e}")
+            if getattr(e, "errno", None) == 13 or "Permission denied" in str(e):
+                print("[Driver] Нет прав на порт. Установи udev-правило:\n"
+                      "  sudo cp 99-soulight-serial.rules /etc/udev/rules.d/\n"
+                      "  sudo udevadm control --reload && sudo udevadm trigger")
             return False
 
         # Handshake: heartbeat burst → switch ON → PC mode

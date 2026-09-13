@@ -63,6 +63,32 @@ else
     echo "Предупреждение: venv не найден — shim для Wayland screen capture не создан"
 fi
 
+# --- udev-правило для доступа к контроллеру без root ---
+# Порт создаётся как root:dialout 0660; без правила обычный пользователь
+# получает EACCES. uaccess-ACL выдаёт доступ активной сессии без
+# добавления в группу и без relogin.
+RULE_SRC="$SCRIPT_DIR/99-soulight-serial.rules"
+RULE_DST="/etc/udev/rules.d/99-soulight-serial.rules"
+if [ -f "$RULE_SRC" ]; then
+    if ! cmp -s "$RULE_SRC" "$RULE_DST" 2>/dev/null; then
+        if [ -w /etc/udev/rules.d ]; then
+            cp "$RULE_SRC" "$RULE_DST"
+        elif command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
+            sudo cp "$RULE_SRC" "$RULE_DST"
+        else
+            echo "udev-правило не установлено (нет root). Выполни вручную:"
+            echo "  sudo cp '$RULE_SRC' $RULE_DST"
+            echo "  sudo udevadm control --reload && sudo udevadm trigger"
+        fi
+    fi
+    if [ -f "$RULE_DST" ]; then
+        udevadm control --reload 2>/dev/null || sudo -n udevadm control --reload 2>/dev/null || true
+        udevadm trigger --subsystem-match=tty --attr-match=idVendor=2e3c 2>/dev/null \
+            || sudo -n udevadm trigger --subsystem-match=tty 2>/dev/null || true
+        echo "udev rule: $RULE_DST"
+    fi
+fi
+
 desktop-file-validate "$APPS_DIR/soulight.desktop" 2>/dev/null || true
 gtk-update-icon-cache -q "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" 2>/dev/null || true
 update-desktop-database "$APPS_DIR" 2>/dev/null || true
