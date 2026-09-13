@@ -904,9 +904,9 @@ class MainWindow(QMainWindow):
         if not self._screen_mirroring_active:
             return
         self._stop_screen_mirroring(restore_output=False)
-        # clear_output=False — не гасим ленту между stop/start,
-        # иначе каждый debounce-restart даёт чёрную вспышку.
-        self._start_screen_mirroring(clear_output=False)
+        # Лента держит последний кадр/resting color до первого нового —
+        # per-led перезаписывает буфер целиком, чёрная прослойка не нужна.
+        self._start_screen_mirroring()
 
     def _queue_mirror_restart(self):
         """
@@ -939,13 +939,12 @@ class MainWindow(QMainWindow):
                 colors[led.physical_index] = SIDE_COLORS.get(led.side, (255, 255, 255))
         self._driver.set_per_led_colors(colors)
 
-    def _start_screen_mirroring(self, clear_output=True):
+    def _start_screen_mirroring(self):
         """
         Запускает screen mirroring: создаёт engine, background thread, таймер.
         Capture + sampling выполняются в отдельном потоке через MirrorWorker,
         чтобы UI оставался отзывчивым.
-        clear_output=False при restart — сохраняем последний кадр,
-        чтобы лента не моргала чёрным между rebuild'ами.
+        Лента держит текущий кадр до первого нового — без чёрной прослойки.
         """
         if not self._driver.connected:
             QMessageBox.warning(self, "Not connected",
@@ -980,10 +979,6 @@ class MainWindow(QMainWindow):
         focus_widget = self.focusWidget()
         if focus_widget is not None:
             focus_widget.clearFocus()
-        # Убираем solid color, чтобы per-LED не конфликтовал.
-        # При restart пропускаем — лента держит последний кадр без вспышки.
-        if clear_output:
-            self._driver.set_color(0, 0, 0)
         # Hardware dimmer — из основного слайдера (mirror-слайдер ему синхронен).
         self._driver.set_brightness(self._slider_bright.value())
         self._screen_mirror_timer.start(self._mirror_interval_ms())
@@ -1199,7 +1194,8 @@ class MainWindow(QMainWindow):
         if self._active_mode == "audio":
             m = self._audio_mode_combo.currentData()
             return f"Audio: {MODE_LABELS.get(m, m)}"
-        return "off"
+        # idle — движок не запущен, лента показывает resting color.
+        return "idle"
 
     def _update_mode_status(self):
         """Строка под кнопками: подключение + активный режим."""
@@ -1261,12 +1257,13 @@ class MainWindow(QMainWindow):
         self._update_mode_status()
 
     def _on_mode_stop(self):
-        """Stop: останавливает активный режим, лента гаснет."""
+        """Stop: останавливает режим и возвращает ленте статичный цвет.
+        Для полного выключения есть кнопка LED OFF."""
         self._stop_all_modes()
         self._active_mode = None
         self._save_mode("off")
         if self._driver.connected:
-            self._driver.set_color(0, 0, 0)
+            self._driver.set_color(self._r, self._g, self._b)
         self._update_mode_status()
 
     def _stop_all_modes(self):
@@ -1521,7 +1518,10 @@ class MainWindow(QMainWindow):
             last_color=[self._r, self._g, self._b],
             brightness=self._slider_bright.value(),
         )
-        if self._driver.connected and self._active_mode == "color":
+        # Resting color: лента показывает сохранённый цвет в idle и в
+        # режиме Color. Во время динамических режимов не трогаем драйвер —
+        # set_color очистил бы per-led буфер и убил бы работающий режим.
+        if self._driver.connected and self._active_mode in (None, "color"):
             self._driver.set_color(self._r, self._g, self._b)
             self._update_mode_status()
 
@@ -1644,7 +1644,6 @@ class MainWindow(QMainWindow):
         self._scene_status_label.setText(f"Running: {PATTERN_LABELS.get(pattern_name, pattern_name)}")
         self._scene_status_label.setStyleSheet("color: #2d8c2d; font-weight: bold;")
         self._btn_mode_stop.setEnabled(True)
-        self._driver.set_color(0, 0, 0)
         self._save_mode("scene", scene_pattern=pattern_name,
                         scene_speed=self._scene_speed_slider.value() / 100.0,
                         scene_full_led=full_led)
@@ -1666,15 +1665,16 @@ class MainWindow(QMainWindow):
 
     def _mode_stopped(self, mode: str):
         """Режим завершился (стоп или ошибка): сбрасываем _active_mode
-        и гасим ленту — иначе она замораживается на последнем кадре.
-        Чёрное шлём только если остановлен именно текущий режим —
-        при переключении режимов _stop_all_modes уже сбросил _active_mode,
-        и промежуточная вспышка чёрного не нужна."""
+        и возвращаем ленте сохранённый статичный цвет — иначе она
+        замораживается на последнем кадре движка.
+        Только если остановлен именно текущий режим — при переключении
+        режимов _stop_all_modes уже сбросил _active_mode, и промежуточный
+        кадр не нужен."""
         if self._active_mode != mode:
             return
         self._active_mode = None
         if self._driver.connected:
-            self._driver.set_color(0, 0, 0)
+            self._driver.set_color(self._r, self._g, self._b)
         self._update_mode_status()
 
     def _on_scene_frame_ready(self, colors):
@@ -1896,7 +1896,6 @@ class MainWindow(QMainWindow):
         self._audio_status_label.setText(f"Starting: {MODE_LABELS.get(mode_name, mode_name)}...")
         self._audio_status_label.setStyleSheet("color: #cc9933; font-weight: bold;")
         self._btn_mode_stop.setEnabled(True)
-        self._driver.set_color(0, 0, 0)
 
     def _stop_audio(self):
         if self._audio_engine is not None:
