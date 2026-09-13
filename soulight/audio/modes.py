@@ -49,6 +49,21 @@ def _smooth(new_value: float, state_key: str, params: dict, factor: float) -> fl
     return result
 
 
+def _smooth_ar(new_value: float, state_key: str, params: dict,
+               attack: float, release: float) -> float:
+    """
+    Сглаживание с раздельной атакой и спадом: вверх быстро (бит слышно
+    сразу — симметричный EMA давал ощутимую задержку реакции), вниз
+    медленно (без нервного фликера на провалах).
+    """
+    history = params.setdefault("history", {})
+    prev = history.get(state_key, new_value)
+    factor = attack if new_value > prev else release
+    result = prev + (new_value - prev) * factor
+    history[state_key] = result
+    return result
+
+
 def _normalize_magnitudes(magnitudes: np.ndarray) -> np.ndarray:
     """Убирает NaN/Inf и базовый шум, возвращает безопасный массив."""
     if magnitudes is None or magnitudes.size == 0:
@@ -79,7 +94,7 @@ def _energy_sum(magnitudes: np.ndarray, freq_bins: np.ndarray, low_hz: float, hi
 
 
 def _auto_gain(value: float, key: str, params: dict,
-               floor: float = 20.0, decay: float = 0.985) -> float:
+               floor: float = 8.0, decay: float = 0.985) -> float:
     """
     Нормировка энергии на бегущий пик: 1.0 = уровень недавнего максимума.
     Делает режимы независимыми от абсолютной громкости источника —
@@ -98,6 +113,7 @@ def _auto_gain(value: float, key: str, params: dict,
         return 0.0
     peak = max(hist.get(key, 0.0) * decay, value, floor)
     hist[key] = peak
+    # v^1.25 — серединка придавлена: тихие звуки не заливаются в 255.
     return _clampf((value / peak) ** 1.25)
 
 
@@ -145,16 +161,17 @@ def spectrum(
     # стабильно тусклую или стабильно пересвеченную картину.
     # Ниже гейта (тишина) — сразу тёмная лента, без residual-мерцания.
     spec_max = float(np.max(sampled_mags))
-    if spec_max < 5.0:
+    if spec_max < 3.0:
         return [(0, 0, 0)] * led_count
-    _auto_gain(spec_max, "spec_peak", params, floor=5.0, decay=0.985)
+    _auto_gain(spec_max, "spec_peak", params, floor=3.0, decay=0.985)
     peak = max(float(params["history"]["spec_peak"]), 1e-3)
 
     colors = []
     hue_shift = float(params.get("color_shift", 0.0))
     for i, mag in enumerate(sampled_mags):
         value = math.tanh(mag / peak * 2.0)
-        value = _smooth(value, f"spec_{i}", params, 0.35)
+        # Быстрая атака — бит виден в следующем же кадре.
+        value = _smooth_ar(value, f"spec_{i}", params, 0.7, 0.3)
         hue = (i / led_count + hue_shift) % 1.0
         sat = 0.9 + value * 0.1
         colors.append(_hsv(hue, sat, value))
@@ -187,11 +204,11 @@ def electronic(
         _energy_sum(mags, freq_bins, 4000, max(8000.0, freq_bins[-1])) * sensitivity * gain,
         "treble_raw", params)
 
-    bass = _smooth(bass, "bass", params, 0.35)
-    mid = _smooth(mid, "mid", params, 0.35)
-    treble = _smooth(treble, "treble", params, 0.35)
+    bass = _smooth_ar(bass, "bass", params, 0.7, 0.3)
+    mid = _smooth_ar(mid, "mid", params, 0.7, 0.3)
+    treble = _smooth_ar(treble, "treble", params, 0.7, 0.3)
 
-    pulse = _smooth(bass, "elec_pulse", params, 0.25)
+    pulse = _smooth_ar(bass, "elec_pulse", params, 0.8, 0.25)
     colors = []
     for i in range(led_count):
         t = abs((i / max(1, led_count - 1)) - 0.5) * 2.0
@@ -235,8 +252,8 @@ def lyricism(
     # Средняя энергия по всем бинам — тихая величина (большинство
     # бинов ~0 даже в музыке), поэтому гейт ниже, чем у band-сумм.
     avg = float(np.mean(mags)) * sensitivity * gain
-    energy = _auto_gain(avg, "avg_raw", params, floor=0.8)
-    energy = _smooth(energy, "energy", params, 0.25)
+    energy = _auto_gain(avg, "avg_raw", params, floor=0.5)
+    energy = _smooth_ar(energy, "energy", params, 0.55, 0.2)
 
     hue = (math.log10(max(100.0, centroid)) - 2.0) / 2.0
     hue = _clampf(hue)
@@ -270,7 +287,7 @@ def pulse(
     bass = _auto_gain(_energy_sum(mags, freq_bins, 20, 250) * sensitivity * gain,
                       "bass_raw", params)
     pulse_raw = bass
-    pulse = _smooth(pulse_raw, "pulse", params, 0.45)
+    pulse = _smooth_ar(pulse_raw, "pulse", params, 0.85, 0.3)
 
     history = params.setdefault("history", {})
     prev = history.get("prev_pulse", pulse)
@@ -323,7 +340,7 @@ def wave(
     peak = float(np.max(sampled))
     # Без порога self-normalize разгоняет шумовую полку тишины до
     # полной яркости — лента светится в отсутствие звука.
-    if peak < 1.0:
+    if peak < 0.6:
         return [(0, 0, 0)] * led_count
     sampled = sampled / peak
 
@@ -331,7 +348,7 @@ def wave(
     hue_shift = float(params.get("color_shift", 0.0))
     for i, val in enumerate(sampled):
         v = _clampf(val)
-        v = _smooth(v, f"wave_{i}", params, 0.4)
+        v = _smooth_ar(v, f"wave_{i}", params, 0.7, 0.3)
         hue = (i / led_count * 0.7 + hue_shift) % 1.0
         colors.append(_hsv(hue, 0.85, v))
     return colors
@@ -360,7 +377,7 @@ def bass(
                      "sub_raw", params)
 
     energy = _clampf(bass + sub * 0.5)
-    energy = _smooth(energy, "bass_energy", params, 0.3)
+    energy = _smooth_ar(energy, "bass_energy", params, 0.75, 0.3)
 
     hue = _clampf(energy * 0.22 + float(params.get("color_shift", 0.0)))
     colors = []
@@ -396,7 +413,7 @@ def disco(
     # delta-условие по нему не работает: auto-gain держит его у ~1.0.
     baseline = _smooth(raw_bass, "disco_base", params, 0.25)
     flash = 1.0 if (bass > 0.5 and raw_bass > baseline * 1.35) else 0.0
-    flash = _smooth(flash, "flash", params, 0.55)
+    flash = _smooth_ar(flash, "flash", params, 0.9, 0.4)
 
     hue_acc = (history.get("hue_acc", 0.0) + bass * 0.015) % 1.0
     history["hue_acc"] = hue_acc

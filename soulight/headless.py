@@ -53,8 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="сценический паттерн (default: rainbow)")
     p.add_argument("--speed", type=float, default=1.0,
                    help="скорость паттерна 0.25-4.0 (default: 1.0)")
-    p.add_argument("--fps", type=float, default=20.0,
-                   help="кадров/с для scene/audio (default: 20)")
+    p.add_argument("--fps", type=float, default=30.0,
+                   help="кадров/с для scene/audio/mirror (default: 30)")
     p.add_argument("--audio-mode", default="spectrum",
                    help="аудио-режим (spectrum, electronic, lyricism, pulse, "
                         "wave, bass, disco)")
